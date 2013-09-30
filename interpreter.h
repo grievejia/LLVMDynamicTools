@@ -6,8 +6,6 @@
 #include "llvm/ExecutionEngine/ExecutionEngine.h"
 #include "llvm/ExecutionEngine/GenericValue.h"
 #include "llvm/CodeGen/IntrinsicLowering.h"
-#include "llvm/Support/DataTypes.h"
-#include "llvm/Support/GetElementPtrTypeIterator.h"
 #include "llvm/Support/DynamicLibrary.h"
 
 #include <ffi.h>

@@ -1,9 +1,12 @@
 #include "interpreter.h"
 #include "llvm/Support/Debug.h"
+#include "varInit.h"
 
 #include <cstring>
 
 using namespace llvm;
+
+extern PtsGraph ptsGraph;
 
 MyInterpreter::MyInterpreter(Module* module): ExecutionEngine(module), td(module)
 {
@@ -1411,6 +1414,19 @@ void MyInterpreter::visitSelectInst(SelectInst &I) {
 	GenericValue Src3 = getOperandValue(I.getOperand(2), SF);
 	GenericValue R = executeSelectInst(Src1, Src2, Src3, Ty);
 	SetValue(&I, R, SF);
+
+	// pts-to analysis
+	if (!isa<PointerType>(Ty))
+		return;
+	if (Ty->isVectorTy())
+		llvm_unreachable("Oops, I can't handle vector condition yet!");
+	Value* srcValue0 = I.getFalseValue();
+	Value* srcValue1 = I.getTrueValue();
+	Value* srcValue = (Src1.IntVal == 0) ? srcValue0 : srcValue1;
+	Variable* dst = variableFactory.getMappedVar(&I);
+	Variable* src = ptrToVariable(srcValue);
+	Variable* srcTgt = ptsGraph.lookup(src);
+	ptsGraph.update(dst, srcTgt);
 }
 
 void MyInterpreter::visitReturnInst(ReturnInst &I) {
@@ -1496,11 +1512,31 @@ void MyInterpreter::visitAllocaInst(AllocaInst &I) {
 
 	if (I.getOpcode() == Instruction::Alloca)
 		ECStack.back().Allocas.add(Memory);
+
+	// pts-to analysis
+	Variable* ptr = variableFactory.getMappedVar(&I);
+	Variable* tgt = ptsInit[ptr];
+	ptsGraph.update(ptr, tgt);
 }
 
 void MyInterpreter::visitGetElementPtrInst(GetElementPtrInst &I) {
 	ExecutionContext &SF = ECStack.back();
 	SetValue(&I, executeGEPOperation(I.getPointerOperand(), gep_type_begin(I), gep_type_end(I), SF), SF);
+
+	// pts-to analysis
+	Variable* dst = variableFactory.getMappedVar(&I);
+	Value* srcValue = I.getPointerOperand();
+	Variable* src = ptrToVariable(srcValue);
+	unsigned offset = GEPtoOffset(&I);
+	Variable* srcTgt = ptsGraph.lookup(src);
+	if (srcTgt == NULL)
+		llvm_unreachable("GEP src points to nothing");
+	if (srcTgt->getType() != ADDR_TAKEN)
+		llvm_unreachable("GEP src points to a top-level?");
+	AddrTakenVar* atSrcTgt = (AddrTakenVar*)srcTgt;
+	if (atSrcTgt->getOffsetBound() >= offset)
+		llvm_unreachable("GEP offset out of bound");
+	ptsGraph.update(dst, variableFactory.getVariable(atSrcTgt->getIndex() + offset));
 }
 
 void MyInterpreter::visitLoadInst(LoadInst &I) {
@@ -1510,8 +1546,19 @@ void MyInterpreter::visitLoadInst(LoadInst &I) {
 	GenericValue Result;
 	LoadValueFromMemory(Result, Ptr, I.getType());
 	SetValue(&I, Result, SF);
-	if (I.isVolatile())
-		dbgs() << "Volatile load " << I;
+
+	// pts-to analysis
+	Variable* dst = variableFactory.getMappedVar(&I);
+	Value* srcValue = I.getPointerOperand();
+	Variable* src = ptrToVariable(srcValue);
+
+	Variable* srcTgt = ptsGraph.lookup(src);
+	if (srcTgt == NULL)
+		llvm_unreachable("Load from a no-tgt pointer");
+	Variable* srcTgtTgt = ptsGraph.lookup(srcTgt);
+	if (srcTgtTgt == NULL)
+		llvm_unreachable("Load from a pointer that points to a no-tgt pointer");
+	ptsGraph.update(dst, srcTgtTgt);
 }
 
 void MyInterpreter::visitStoreInst(StoreInst &I) {
@@ -1519,8 +1566,21 @@ void MyInterpreter::visitStoreInst(StoreInst &I) {
 	GenericValue Val = getOperandValue(I.getOperand(0), SF);
 	GenericValue SRC = getOperandValue(I.getPointerOperand(), SF);
 	StoreValueToMemory(Val, (GenericValue *)GVTOP(SRC), I.getOperand(0)->getType());
-	if (I.isVolatile())
-		dbgs() << "Volatile store: " << I;
+	
+	// pts-to analysis
+	Value* dstValue = I.getPointerOperand();
+	Value* srcValue = I.getValueOperand();
+	if (!isa<PointerType>(srcValue->getType()))
+		return;
+	Variable* src = ptrToVariable(srcValue);
+	Variable* dst = ptrToVariable(dstValue);
+	if (dstValue == NULL)
+		llvm_unreachable("Store into a null pointer");
+	Variable* dstTgt = ptsGraph.lookup(dst);
+	if (dstTgt == NULL)
+		llvm_unreachable("Store into a no-tgt pointer");
+	Variable* srcTgt = ptsGraph.lookup(src);
+	ptsGraph.update(dstTgt, srcTgt);
 }
 
 void MyInterpreter::visitCallSite(CallSite CS) {
@@ -1733,6 +1793,36 @@ void MyInterpreter::visitIntToPtrInst(IntToPtrInst &I) {
 void MyInterpreter::visitBitCastInst(BitCastInst &I) {
 	ExecutionContext &SF = ECStack.back();
 	SetValue(&I, executeBitCastInst(I.getOperand(0), I.getType(), SF), SF);
+
+	// pts-to analysis
+	const Type* ty = I.getType();
+	if (!isa<PointerType>(ty))
+		return;
+	Variable* src = NULL;
+	Value* srcValue = I.getOperand(0);
+	while (ConstantExpr* constExp = dyn_cast<ConstantExpr>(srcValue))
+	{
+		switch (constExp->getOpcode())
+		{
+			case Instruction::BitCast:
+				srcValue = constExp->getOperand(0);
+				break;
+			case Instruction::GetElementPtr:
+				src = ConstGEPtoVariable(constExp);
+				break;
+			default:
+				assert(false && "Other types of constExpr not supported here");
+		}
+		if (src != NULL)
+			break;
+	}
+	if (src == NULL)
+		src = variableFactory.getMappedVar(srcValue);
+	if (src == NULL)
+		llvm_unreachable("bitcast missing operand");
+	Variable* dst = variableFactory.getMappedVar(&I);
+	Variable* srcTgt = ptsGraph.lookup(src);
+	ptsGraph.update(dst, srcTgt);
 }
 
 #define IMPLEMENT_VAARG(TY) \

@@ -1,9 +1,14 @@
 #include "main.h"
 #include "interpreter.h"
+#include "variable.h"
+#include "varInit.h"
 
 #include <string>
 
 using namespace llvm;
+
+DataLayout* layoutInfo;
+PtsGraph ptsGraph;
 
 namespace {
 	cl::opt<std::string> bitcodeFile(cl::desc("<input bitcode (*.ll or *.bc)>"), cl::Positional, cl::Required);
@@ -32,6 +37,25 @@ int main(int argc, char **argv, char * const *envp) {
 		return -1;
 	}
 
+	// Initialize variables
+	layoutInfo = new DataLayout(module);
+	variableInit(*module);
+	variableFactory.sortVariables();
+	//variableFactory.printFactoryInfo();
+	delete layoutInfo;
+
+	// Move pts-to info from ptsInit to ptsGraph
+	for (DenseMap<Variable*, Variable*>::iterator itr = ptsInit.begin(), ite = ptsInit.end(); itr != ite; ++itr)
+	{
+		Variable* lhs = itr->first;
+		if (lhs->getType() == ARGUMENT || (lhs->getType() == TOP_LEVEL && !((TopLevelVar*)lhs)->isGlobal()))
+			continue;
+		
+		Variable* rhs = itr->second;
+		ptsGraph.update(lhs, rhs);
+	}
+
+	// Do the interpretation
 	MyInterpreter* interp = new MyInterpreter(module);
 	Function* startFunc = module->getFunction("main");
 	if (startFunc == NULL)
@@ -42,6 +66,8 @@ int main(int argc, char **argv, char * const *envp) {
 	Argv.insert(Argv.begin(), bitcodeFile);
 	int retValue = interp->runFunctionAsMain(startFunc, Argv, envp);
 	errs() << "Interpreter returns " << retValue << "\n";
+
+	ptsGraph.printPtsSets();
 
 	errs() << "Bye-bye!\n";
 
