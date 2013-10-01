@@ -1,12 +1,13 @@
 #include "interpreter.h"
 #include "llvm/Support/Debug.h"
 #include "varInit.h"
+#include "pts-external.h"
 
 #include <cstring>
 
 using namespace llvm;
 
-extern PtsGraph ptsGraph;
+static Variable* retVar = NULL;
 
 MyInterpreter::MyInterpreter(Module* module): ExecutionEngine(module), td(module)
 {
@@ -40,7 +41,7 @@ GenericValue MyInterpreter::runFunction(Function *F, const std::vector<GenericVa
 		ActualArgs.push_back(ArgValues[i]);
 
 	// Set up the function call.
-	callFunction(F, ActualArgs);
+	callFunction(F, ActualArgs, NULL);
 
 	// Start executing the function.
 	run();
@@ -52,7 +53,7 @@ static void SetValue(Value *V, GenericValue Val, ExecutionContext &SF) {
   SF.Values[V] = Val;
 }
 
-void MyInterpreter::callFunction(Function *F, const std::vector<GenericValue> &ArgVals)
+void MyInterpreter::callFunction(Function *F, const std::vector<GenericValue> &ArgVals, CallSite* cs)
 {
 	assert((ECStack.empty() || ECStack.back().Caller.getInstruction() == 0 || ECStack.back().Caller.arg_size() == ArgVals.size()) && "Incorrect number of arguments passed into function call!");
 
@@ -64,8 +65,19 @@ void MyInterpreter::callFunction(Function *F, const std::vector<GenericValue> &A
 	// Special handling for external functions.
 	if (F->isDeclaration()) {
 		GenericValue result = callExternalFunction (F, ArgVals);
+		if (extInfo.isExternal(F))
+		{
+			ptsAnalyzeExtFunction(cs);
+		}
+
 		// Simulate a 'ret' instruction of the appropriate type.
 		popStackAndReturnValueToCaller (F->getReturnType (), result);
+		return;
+	}
+
+	if (extInfo.isExternal(F))
+	{
+		ptsAnalyzeExtFunction(cs);
 		return;
 	}
 
@@ -83,6 +95,25 @@ void MyInterpreter::callFunction(Function *F, const std::vector<GenericValue> &A
 
 	// Handle varargs arguments...
 	StackFrame.VarArgs.assign(ArgVals.begin()+i, ArgVals.end());
+
+	// pts-to analysis
+	// We do the analysis here after the indirect call target is resolved
+	if (cs == NULL)
+		return;
+	CallSite::arg_iterator csItr = cs->arg_begin();
+	for (Function::arg_iterator itr = F->arg_begin(), ite = F->arg_end(); itr != ite; ++itr, ++csItr)
+	{
+		Value* formalArg = itr;
+		if (!isa<PointerType>(formalArg->getType()))
+			continue;
+		Value* actualArg = *csItr;
+		Variable* formalVar = variableFactory.getMappedVar(formalArg);
+		Variable* actualVar = ptrToVariable(actualArg);
+		if (formalVar == NULL)
+			llvm_unreachable("formal var is null?");
+		PtsSet actualTgt = ptsGraph.lookup(actualVar);
+		ptsGraph.update(formalVar, actualTgt);
+	}
 }
 
 void MyInterpreter::popStackAndReturnValueToCaller(Type *RetTy, GenericValue Result)
@@ -109,7 +140,18 @@ void MyInterpreter::popStackAndReturnValueToCaller(Type *RetTy, GenericValue Res
 			if (InvokeInst *II = dyn_cast<InvokeInst> (I))
 				SwitchToNewBasicBlock (II->getNormalDest (), CallingSF);
 			CallingSF.Caller = CallSite();          // We returned from the call...
+
+			// pts-to analysis
+			if (retVar != NULL)
+			{
+				Variable* dst = variableFactory.getMappedVar(I);
+				if (dst == NULL)
+					llvm_unreachable("ret dst is null?");
+				PtsSet retTgt = ptsGraph.lookup(retVar);
+				ptsGraph.update(dst, retTgt);
+			}
 		}
+		retVar = NULL;
 	}
 }
 
@@ -1238,8 +1280,10 @@ void MyInterpreter::run()
 		// Track the number of dynamic instructions executed.
 		//++NumDynamicInsts;
 
-		//errs() << "About to interpret: " << I << "\n";
+		errs() << "About to interpret: " << I << "\n";
 		visit(I);
+		ptsGraph.printPtsSets();
+		errs() << "\n";
 	}
 }
 
@@ -1425,7 +1469,7 @@ void MyInterpreter::visitSelectInst(SelectInst &I) {
 	Value* srcValue = (Src1.IntVal == 0) ? srcValue0 : srcValue1;
 	Variable* dst = variableFactory.getMappedVar(&I);
 	Variable* src = ptrToVariable(srcValue);
-	Variable* srcTgt = ptsGraph.lookup(src);
+	PtsSet srcTgt = ptsGraph.lookup(src);
 	ptsGraph.update(dst, srcTgt);
 }
 
@@ -1438,6 +1482,15 @@ void MyInterpreter::visitReturnInst(ReturnInst &I) {
 	if (I.getNumOperands()) {
 		RetTy  = I.getReturnValue()->getType();
 		Result = getOperandValue(I.getReturnValue(), SF);
+	}
+
+	// pts-to analysis
+	// Using global variable to pass information across functions is really ugly. However, this is the only way I can think of that does not mess the existing codebase.
+	if (isa<PointerType>(RetTy))
+	{
+		retVar = variableFactory.getMappedVar(I.getReturnValue());
+		if (retVar == NULL)
+			llvm_unreachable("retVar is null?");
 	}
 
 	popStackAndReturnValueToCaller(RetTy, Result);
@@ -1517,6 +1570,17 @@ void MyInterpreter::visitAllocaInst(AllocaInst &I) {
 	Variable* ptr = variableFactory.getMappedVar(&I);
 	Variable* tgt = ptsInit[ptr];
 	ptsGraph.update(ptr, tgt);
+
+	if (tgt->getType() != ADDR_TAKEN)
+		llvm_unreachable("Pointer to a top-level var?");
+	unsigned bound = ((AddrTakenVar*)tgt)->getOffsetBound();
+	for (unsigned i = 0; i < bound; ++i)
+	{
+		Variable* field = variableFactory.getVariable(ptr->getIndex() + i + 1);
+		Variable* fieldTgt = variableFactory.getVariable(tgt->getIndex() + i + 1);
+		ptsGraph.update(field, fieldTgt);
+	}
+
 }
 
 void MyInterpreter::visitGetElementPtrInst(GetElementPtrInst &I) {
@@ -1528,15 +1592,21 @@ void MyInterpreter::visitGetElementPtrInst(GetElementPtrInst &I) {
 	Value* srcValue = I.getPointerOperand();
 	Variable* src = ptrToVariable(srcValue);
 	unsigned offset = GEPtoOffset(&I);
-	Variable* srcTgt = ptsGraph.lookup(src);
-	if (srcTgt == NULL)
-		llvm_unreachable("GEP src points to nothing");
-	if (srcTgt->getType() != ADDR_TAKEN)
-		llvm_unreachable("GEP src points to a top-level?");
-	AddrTakenVar* atSrcTgt = (AddrTakenVar*)srcTgt;
-	if (atSrcTgt->getOffsetBound() >= offset)
-		llvm_unreachable("GEP offset out of bound");
-	ptsGraph.update(dst, variableFactory.getVariable(atSrcTgt->getIndex() + offset));
+	PtsSet srcTgt = ptsGraph.lookup(src);
+
+	std::vector<unsigned> indexVec;
+	srcTgt.toIndexVector(indexVec);
+	for (std::vector<unsigned>::iterator itr = indexVec.begin(), ite = indexVec.end(); itr != ite; ++itr)
+	{
+		Variable* v = variableFactory.getVariable(*itr);
+		if (v->getType() != ADDR_TAKEN)
+			llvm_unreachable("GEP src points to a top-level?");
+		AddrTakenVar* atSrcTgt = (AddrTakenVar*)v;
+		if (offset < atSrcTgt->getOffsetBound())
+			ptsGraph.update(dst, variableFactory.getVariable(atSrcTgt->getIndex() + offset), true);
+		else if (atSrcTgt->isArray())
+			ptsGraph.update(dst, atSrcTgt, true);
+	}
 }
 
 void MyInterpreter::visitLoadInst(LoadInst &I) {
@@ -1548,16 +1618,15 @@ void MyInterpreter::visitLoadInst(LoadInst &I) {
 	SetValue(&I, Result, SF);
 
 	// pts-to analysis
+	if (!isa<PointerType>(I.getType()))
+		return;
+
 	Variable* dst = variableFactory.getMappedVar(&I);
 	Value* srcValue = I.getPointerOperand();
 	Variable* src = ptrToVariable(srcValue);
 
-	Variable* srcTgt = ptsGraph.lookup(src);
-	if (srcTgt == NULL)
-		llvm_unreachable("Load from a no-tgt pointer");
-	Variable* srcTgtTgt = ptsGraph.lookup(srcTgt);
-	if (srcTgtTgt == NULL)
-		llvm_unreachable("Load from a pointer that points to a no-tgt pointer");
+	PtsSet srcTgt = ptsGraph.lookup(src);
+	PtsSet srcTgtTgt = ptsGraph.lookup(srcTgt);
 	ptsGraph.update(dst, srcTgtTgt);
 }
 
@@ -1576,10 +1645,8 @@ void MyInterpreter::visitStoreInst(StoreInst &I) {
 	Variable* dst = ptrToVariable(dstValue);
 	if (dstValue == NULL)
 		llvm_unreachable("Store into a null pointer");
-	Variable* dstTgt = ptsGraph.lookup(dst);
-	if (dstTgt == NULL)
-		llvm_unreachable("Store into a no-tgt pointer");
-	Variable* srcTgt = ptsGraph.lookup(src);
+	PtsSet dstTgt = ptsGraph.lookup(dst);
+	PtsSet srcTgt = ptsGraph.lookup(src);
 	ptsGraph.update(dstTgt, srcTgt);
 }
 
@@ -1640,7 +1707,7 @@ void MyInterpreter::visitCallSite(CallSite CS) {
 	// To handle indirect calls, we must get the pointer value from the argument
 	// and treat it as a function pointer.
 	GenericValue SRC = getOperandValue(SF.Caller.getCalledValue(), SF);
-	callFunction((Function*)GVTOP(SRC), ArgVals);
+	callFunction((Function*)GVTOP(SRC), ArgVals, &CS);
 }
 
 // auxilary function for shift operations
@@ -1821,7 +1888,7 @@ void MyInterpreter::visitBitCastInst(BitCastInst &I) {
 	if (src == NULL)
 		llvm_unreachable("bitcast missing operand");
 	Variable* dst = variableFactory.getMappedVar(&I);
-	Variable* srcTgt = ptsGraph.lookup(src);
+	PtsSet srcTgt = ptsGraph.lookup(src);
 	ptsGraph.update(dst, srcTgt);
 }
 

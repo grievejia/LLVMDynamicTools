@@ -113,7 +113,7 @@ public:
 
 	// Methods used to execute code:
 	// Place a call on the stack
-	void callFunction(llvm::Function *F, const std::vector<llvm::GenericValue> &ArgVals);
+	void callFunction(llvm::Function *F, const std::vector<llvm::GenericValue> &ArgVals, llvm::CallSite* cs);
 	llvm::GenericValue callExternalFunction(llvm::Function *F, const std::vector<llvm::GenericValue> &ArgVals);
 	void popStackAndReturnValueToCaller(llvm::Type *RetTy, llvm::GenericValue Result);
 	void run();                // Execute instructions until nothing left to do

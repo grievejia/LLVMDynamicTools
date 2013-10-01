@@ -58,7 +58,7 @@ Variable* ConstGEPtoVariable(ConstantExpr* exp)
 		baseVar = variableFactory.getMappedVar(basePtr);
 	
 	assert(baseVar != NULL && "ConstGEPtoVariable: baseVar lookup failed");
-	errs() << "baseVar = " << *baseVar << "\n";
+	//errs() << "baseVar = " << *baseVar << "\n";
 	assert(baseVar->getType() == TOP_LEVEL && "baseVar must be a top-level var");
 	
 	// Now compute the offset from base pointer (in bytes)
@@ -184,12 +184,12 @@ void processGlobalInitializer(Variable* ptr, Constant* initializer)
 				Variable* other;
 				other = ConstGEPtoVariable(exp);
 				assert(ptsInit.count(other) && "initializing using an uninitialized variable");
-				ptsInit[ptr] = ptsInit[other];
+				ptsInit[ptsInit[ptr]] = ptsInit[other];
 				break;
 			}
 			case Instruction::IntToPtr:
 				// var will point to unknown target
-				ptsInit[ptr] = variableFactory.getUnknownTarget();
+				ptsInit[ptsInit[ptr]] = variableFactory.getUnknownTarget();
 				break;
 			case Instruction::PtrToInt:
 				// Do nothing
@@ -223,7 +223,9 @@ void processGlobalInitializer(Variable* ptr, Constant* initializer)
 	{
 		DenseMap<Variable*, Variable*>::iterator itr = ptsInit.find(variableFactory.getMappedVar(other));
 		assert(itr != ptsInit.end() && "Global initializer variable not initialized!");
-		ptsInit[ptr] = itr->second;
+		Variable* ptrTgt = ptsInit[ptr];
+		assert(ptrTgt != NULL && "Global variable no tgt?");
+		ptsInit[ptrTgt] = itr->second;
 		return;
 	}
 	else if (ConstantArray* a = dyn_cast<ConstantArray>(initializer))
@@ -262,7 +264,7 @@ void processStruct(Value* value, const StructType* structType, Function* f = NUL
 	// Empty struct has only one pointer that points to nothing
 	if (stInfo->isEmpty())
 	{
-		TopLevelVar* topVar = variableFactory.getNextTopLevelVar(f == NULL);
+		TopLevelVar* topVar = variableFactory.getNextTopLevelVar(f == NULL, false);
 		topVar->name = "[empty_struct]" + baseName;
 		variableFactory.setMappedVar(value, topVar);
 		return;
@@ -274,7 +276,7 @@ void processStruct(Value* value, const StructType* structType, Function* f = NUL
 	// First create all top-level vars so that they have contiguous indicies
 	for (unsigned i = 0; i < stSize; ++i)
 	{
-		TopLevelVar* topVar = variableFactory.getNextTopLevelVar(f == NULL, stSize - i);
+		TopLevelVar* topVar = variableFactory.getNextTopLevelVar(f == NULL, stInfo->isFieldArray(i), stSize - i);
 		std::stringstream ss;
 		ss << i;
 		topVar->name = baseName + "/" + ss.str();
@@ -285,7 +287,7 @@ void processStruct(Value* value, const StructType* structType, Function* f = NUL
 	// Next create all addr-taken vars
 	for (unsigned i = 0; i < stSize; ++i)
 	{
-		AddrTakenVar* atVar = variableFactory.getNextAddrTakenVar(f == NULL, stSize - i);
+		AddrTakenVar* atVar = variableFactory.getNextAddrTakenVar(f == NULL, stInfo->isFieldArray(i), stSize - i);
 		TopLevelVar* topVar = fields[i];
 		ptsInit[topVar] = atVar;
 		atVar->name = topVar->name + "_tgt";
@@ -320,10 +322,10 @@ void processGlobals(Module& M)
 		else
 		{
 			// Global variables are always a top-level pointer in LLVM IR
-			TopLevelVar* topVar = variableFactory.getNextTopLevelVar(true);
+			TopLevelVar* topVar = variableFactory.getNextTopLevelVar(true, isArray);
 			topVar->name = itr->getName();
 			variableFactory.setMappedVar(itr, topVar);
-			AddrTakenVar* atVar = variableFactory.getNextAddrTakenVar(true);
+			AddrTakenVar* atVar = variableFactory.getNextAddrTakenVar(true, isArray);
 			atVar->name = topVar->name + "_tgt";
 			variableFactory.setAllocSite(atVar, itr);
 			ptsInit[topVar] = atVar;
@@ -345,12 +347,12 @@ void processFunctionPointer(Function* f)
 	if (addrTaken)
 	{
 		// Allocate a function object and a pointer to that object
-		TopLevelVar* funPtr = variableFactory.getNextTopLevelVar(true);
+		TopLevelVar* funPtr = variableFactory.getNextTopLevelVar(true, false);
 		funPtr->name = f->getName();
 		funPtr->name = "<func>" + funPtr->name;
 		variableFactory.setMappedVar(f, funPtr);
 		
-		AddrTakenVar* funObj = variableFactory.getNextAddrTakenVar(true);
+		AddrTakenVar* funObj = variableFactory.getNextAddrTakenVar(true, false);
 		funObj->name = funPtr->name + "_tgt";
 		variableFactory.setAllocSite(funObj, f);
 		
@@ -368,11 +370,11 @@ void processFunctionPointer(Function* f)
 	{
 		Argument* argv = ++f->arg_begin();
 		// Argv is treated as global variable
-		TopLevelVar* argvPtr = variableFactory.getNextTopLevelVar(true);
+		TopLevelVar* argvPtr = variableFactory.getNextTopLevelVar(true, true);
 		argvPtr->name = "argv_ptr";
 		variableFactory.setMappedVar(argv, argvPtr);
 		
-		AddrTakenVar* argvObj = variableFactory.getNextAddrTakenVar(true);
+		AddrTakenVar* argvObj = variableFactory.getNextAddrTakenVar(true, true);
 		argvObj->name = "argv_tgt";
 		variableFactory.setAllocSite(argvObj, argv);
 		
@@ -396,7 +398,7 @@ void processFunctionPointer(Function* f)
 		// Make a top-level var for ptr return value
 		if (isa<PointerType>(f->getReturnType()))
 		{
-			TopLevelVar* retPtr = variableFactory.getNextTopLevelVar(true);
+			TopLevelVar* retPtr = variableFactory.getNextTopLevelVar(true, false);
 			retPtr->name = f->getName();
 			retPtr->name += "/ret";
 			retPtrMap[f] = retPtr;
@@ -428,22 +430,22 @@ void visitFunction(Function* f)
 				processStruct(inst, structType, f);
 			else
 			{
-				TopLevelVar* instPtr = variableFactory.getNextTopLevelVar();
+				TopLevelVar* instPtr = variableFactory.getNextTopLevelVar(false, isArray);
 				if (inst->hasName()) instPtr->name = inst->getName();
 				else { std::string s; raw_string_ostream ss(s); inst->print(ss); instPtr->name = ss.str().substr(2, ss.str().find_first_of("=")-3);}
 				instPtr->name = fname + "_" + instPtr->name;
 				variableFactory.setMappedVar(inst, instPtr);
 				
-				AddrTakenVar* allocObj = variableFactory.getNextAddrTakenVar();
+				AddrTakenVar* allocObj = variableFactory.getNextAddrTakenVar(false, isArray);
 				allocObj->name = instPtr->name + "_tgt";
 				variableFactory.setAllocSite(allocObj, inst);
 				
 				ptsInit[instPtr] = allocObj;
 			}
 		}
-		else if (isa<PointerType>(inst->getType()))
+		else if (PointerType* ptrType = dyn_cast<PointerType>(inst->getType()))
 		{
-			TopLevelVar* instPtr = variableFactory.getNextTopLevelVar();
+			TopLevelVar* instPtr = variableFactory.getNextTopLevelVar(false, ptrType->getElementType()->isArrayTy());
 			if (inst->hasName()) instPtr->name = inst->getName();
 			else { std::string s; raw_string_ostream ss(s); ss << *inst; instPtr->name = ss.str().substr(2, ss.str().find_first_of("=")-3); }
 			instPtr->name = fname + "_" + instPtr->name;

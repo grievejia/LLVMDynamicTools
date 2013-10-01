@@ -3,6 +3,7 @@
 using namespace llvm;
 
 VariableFactory variableFactory;
+PtsGraph ptsGraph;
 
 VariableFactory::VariableFactory(): numAddrTakenVar(0), numTopLevelVar(0), sorted(false)
 {
@@ -29,9 +30,9 @@ VariableFactory::~VariableFactory()
 	allocatedVars.clear();
 }
 
-TopLevelVar* VariableFactory::getNextTopLevelVar(bool g, unsigned bound)
+TopLevelVar* VariableFactory::getNextTopLevelVar(bool g, bool a, unsigned bound)
 {
-	TopLevelVar* ret = new TopLevelVar(g, bound);
+	TopLevelVar* ret = new TopLevelVar(g, a, bound);
 	ret->setIndex(allocatedVars.size());
 	allocatedVars.push_back(ret);
 
@@ -39,9 +40,9 @@ TopLevelVar* VariableFactory::getNextTopLevelVar(bool g, unsigned bound)
 	return ret;
 }
 
-AddrTakenVar* VariableFactory::getNextAddrTakenVar(bool g, unsigned bound)
+AddrTakenVar* VariableFactory::getNextAddrTakenVar(bool g, bool a, unsigned bound)
 {
-	AddrTakenVar* ret = new AddrTakenVar(g, bound);
+	AddrTakenVar* ret = new AddrTakenVar(g, a, bound);
 	ret->setIndex(allocatedVars.size());
 	allocatedVars.push_back(ret);
 

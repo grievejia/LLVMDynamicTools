@@ -8,7 +8,6 @@
 using namespace llvm;
 
 DataLayout* layoutInfo;
-PtsGraph ptsGraph;
 
 namespace {
 	cl::opt<std::string> bitcodeFile(cl::desc("<input bitcode (*.ll or *.bc)>"), cl::Positional, cl::Required);
@@ -42,7 +41,6 @@ int main(int argc, char **argv, char * const *envp) {
 	variableInit(*module);
 	variableFactory.sortVariables();
 	//variableFactory.printFactoryInfo();
-	delete layoutInfo;
 
 	// Move pts-to info from ptsInit to ptsGraph
 	for (DenseMap<Variable*, Variable*>::iterator itr = ptsInit.begin(), ite = ptsInit.end(); itr != ite; ++itr)
@@ -71,6 +69,7 @@ int main(int argc, char **argv, char * const *envp) {
 
 	errs() << "Bye-bye!\n";
 
+	delete layoutInfo;
 	return 0;
 }
 

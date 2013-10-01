@@ -14,14 +14,15 @@ class Variable
 private:
 	VariableType type;
 	unsigned index;
-	bool global;
+	bool global, array;
 protected:
-	Variable(VariableType t, bool g): type(t), global(g) {}
+	Variable(VariableType t, bool g, bool a): type(t), global(g), array(a) {}
 public:
 	VariableType getType() { return type; }
 	unsigned getIndex() { return index; }
 	void setIndex(unsigned i) { index = i; }
 	bool isGlobal() { return global; }
+	bool isArray() { return array; }
 	friend llvm::raw_ostream& operator<< (llvm::raw_ostream& stream, const Variable& v);
 	
 	std::string name;
@@ -32,7 +33,7 @@ class TopLevelVar: public Variable
 private:
 	unsigned offsetBound;
 public:
-	TopLevelVar(bool g, unsigned o): Variable(TOP_LEVEL, g), offsetBound(o) {}
+	TopLevelVar(bool g, bool a, unsigned o): Variable(TOP_LEVEL, g, a), offsetBound(o) {}
 	unsigned getOffsetBound() { return offsetBound; }
 	void setOffsetBound(unsigned o) { offsetBound = o; }
 };
@@ -40,7 +41,7 @@ public:
 class ArgumentVar: public Variable
 {
 public:
-	ArgumentVar(): Variable(ARGUMENT, false) {}
+	ArgumentVar(): Variable(ARGUMENT, false, false) {}
 };
 
 class AddrTakenVar: public Variable
@@ -48,7 +49,7 @@ class AddrTakenVar: public Variable
 private:
 	unsigned offsetBound;
 public:
-	AddrTakenVar(bool g, unsigned o): Variable(ADDR_TAKEN, g), offsetBound(o) {}
+	AddrTakenVar(bool g, bool a, unsigned o): Variable(ADDR_TAKEN, g, a), offsetBound(o) {}
 	unsigned getOffsetBound() { return offsetBound; }
 };
 
@@ -69,8 +70,8 @@ public:
 	VariableFactory();
 	
 	// Variable constructor
-	TopLevelVar* getNextTopLevelVar(bool g = false, unsigned offsetBound = 0);
-	AddrTakenVar* getNextAddrTakenVar(bool g = false, unsigned offsetBound = 0);
+	TopLevelVar* getNextTopLevelVar(bool g = false, bool a = false, unsigned offsetBound = 0);
+	AddrTakenVar* getNextAddrTakenVar(bool g = false, bool a = false, unsigned offsetBound = 0);
 	ArgumentVar* getNextArgumentVar();
 	unsigned getNumTopLevelVar() { return numTopLevelVar; }
 	unsigned getNumAddrTakenVar() { return numAddrTakenVar; }
@@ -163,36 +164,86 @@ public:
 class PtsGraph
 {
 private:
-	llvm::DenseMap<Variable*, Variable*> store;
+	std::map<Variable*, PtsSet> store;
 public:
-	typedef llvm::DenseMap<Variable*, Variable*>::iterator iterator;
+	typedef std::map<Variable*, PtsSet>::iterator iterator;
 	PtsGraph() {}
-	Variable* lookup(Variable* v)
+	PtsSet lookup(Variable* v)
 	{
 		if (v == NULL)
-			return NULL;
+			return PtsSet();
 
 		iterator itr = store.find(v);
 		if (itr == store.end())
-			return NULL;
+			return PtsSet();
 		else
 			return itr->second;
 	}
-	void update(Variable* ptr, Variable* obj)
+	PtsSet lookup(PtsSet set)
 	{
+		std::vector<unsigned> indexVec;
+		set.toIndexVector(indexVec);
+		PtsSet ret;
+		for (std::vector<unsigned>::iterator itr = indexVec.begin(), ite = indexVec.end(); itr != ite; ++itr)
+		{
+			Variable* v = variableFactory.getVariable(*itr);
+			ret.unionWith(lookup(v));
+		}
+		return ret;
+	}
+	void update(Variable* ptr, PtsSet set, bool weak = false)
+	{
+		if (ptr == NULL)
+			llvm_unreachable("Why update an empty ptr?");
+
+		weak |= ptr->isArray();
 		iterator itr = store.find(ptr);
 		if (itr ==  store.end())
 		{
-			if (obj != NULL)
-				store.insert(std::make_pair(ptr, obj));
+			if (!set.isEmpty())
+				store.insert(std::make_pair(ptr, set));
 		}
 		else
 		{
-			if (obj != NULL)
-				itr->second = obj;
+			if (weak)
+			{
+				// Weak update
+				(itr->second).unionWith(set);
+			}
 			else
-				store.erase(itr);
+			{
+				// Strong update
+				if (!set.isEmpty())
+					itr->second = set;
+				else
+					store.erase(itr);
+			}
 		}
+	}
+	void update(PtsSet dstSet, PtsSet srcSet)
+	{
+		std::vector<unsigned> indexVec;
+		dstSet.toIndexVector(indexVec);
+		bool isStrong = (indexVec.size() == 1);
+		for (std::vector<unsigned>::iterator itr = indexVec.begin(), ite = indexVec.end(); itr != ite; ++itr)
+		{
+			Variable* dst = variableFactory.getVariable(*itr);
+			update(dst, srcSet, !isStrong);
+		}
+	}
+	void update(Variable* ptr, Variable* obj, bool weak = false)
+	{
+		if (obj->getType() != ADDR_TAKEN)
+			llvm_unreachable("pointer to top-level var?");
+		PtsSet set;
+		set.insert(obj);
+		update(ptr, set, weak);
+	}
+	void remove(Variable* ptr)
+	{
+		if (ptr == NULL)
+			return;
+		store.erase(ptr);
 	}
 	void printPtsSets()
 	{
@@ -200,11 +251,19 @@ public:
 		for (iterator itr = store.begin(), ite = store.end(); itr != ite; ++itr)
 		{
 			Variable* v = itr->first;
-			Variable* obj = itr->second;
-			llvm::errs() << *v << "  ==>>  " << *obj;
+			PtsSet obj = itr->second;
+			llvm::errs() << *v << "  ==>>  {";
+
+			std::vector<unsigned> indexVec;
+			obj.toIndexVector(indexVec);
+			for (std::vector<unsigned>::iterator vecItr = indexVec.begin(), vecIte = indexVec.end(); vecItr != vecIte; ++vecItr)
+			llvm::errs() << *(variableFactory.getVariable(*vecItr)) << ", ";
+			llvm::errs() << "}\n";
 		}
 		llvm::errs() << "----End of Print----\n";
 	}
 };
+
+extern PtsGraph ptsGraph;
 
 #endif
