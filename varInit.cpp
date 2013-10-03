@@ -102,7 +102,9 @@ Variable* ConstGEPtoVariable(ConstantExpr* exp)
 			StructType* stType = cast<StructType>(trueElemType);
 			const StructLayout* stLayout = layoutInfo->getStructLayout(stType);
 			unsigned idx = stLayout->getElementContainingOffset(offset);
-			fieldNum += idx;
+			assert(structInfoMap.count(stType) && "structInfoMap should have info for all structs!");
+			StructInfo* stInfo = structInfoMap[stType];
+			fieldNum += stInfo->getOffset(idx);
 			offset -= stLayout->getElementOffset(idx);
 			trueElemType = stType->getElementType(idx);
 		}
