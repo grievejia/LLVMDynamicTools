@@ -16,7 +16,7 @@ namespace {
 
 int main(int argc, char **argv, char * const *envp) {
 	cl::ParseCommandLineOptions(argc, argv, "Jia's execution tracer\n");
-	errs() << "Hello, " << bitcodeFile << " !\n";
+	DBG_OUTPUT(errs() << "Hello, " << bitcodeFile << " !\n";)
 
 	// Load the bitcode
 	LLVMContext& context = getGlobalContext();
@@ -39,19 +39,8 @@ int main(int argc, char **argv, char * const *envp) {
 	// Initialize variables
 	layoutInfo = new DataLayout(module);
 	variableInit(*module);
-	variableFactory.sortVariables();
 	//variableFactory.printFactoryInfo();
-
-	// Move pts-to info from ptsInit to ptsGraph
-	for (DenseMap<Variable*, Variable*>::iterator itr = ptsInit.begin(), ite = ptsInit.end(); itr != ite; ++itr)
-	{
-		Variable* lhs = itr->first;
-		if (lhs->getType() == ARGUMENT || (lhs->getType() == TOP_LEVEL && !((TopLevelVar*)lhs)->isGlobal()))
-			continue;
-		
-		Variable* rhs = itr->second;
-		ptsGraph.update(lhs, rhs);
-	}
+	//ptsGraph.printPtsSets();
 
 	// Do the interpretation
 	MyInterpreter* interp = new MyInterpreter(module);
@@ -63,11 +52,11 @@ int main(int argc, char **argv, char * const *envp) {
 	}
 	Argv.insert(Argv.begin(), bitcodeFile);
 	int retValue = interp->runFunctionAsMain(startFunc, Argv, envp);
-	errs() << "Interpreter returns " << retValue << "\n";
+//	errs() << "Interpreter returns " << retValue << "\n";
 
 	ptsGraph.printPtsSets();
 
-	errs() << "Bye-bye!\n";
+	DBG_OUTPUT(errs() << "Bye-bye!\n";)
 
 	delete layoutInfo;
 	return 0;

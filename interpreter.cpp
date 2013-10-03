@@ -1280,10 +1280,9 @@ void MyInterpreter::run()
 		// Track the number of dynamic instructions executed.
 		//++NumDynamicInsts;
 
-		errs() << "About to interpret: " << I << "\n";
+		DBG_OUTPUT(errs() << "About to interpret: " << I << "\n";)
 		visit(I);
-		ptsGraph.printPtsSets();
-		errs() << "\n";
+		DBG_OUTPUT(ptsGraph.printPtsSets();errs() << "\n";)
 	}
 }
 
@@ -1568,7 +1567,7 @@ void MyInterpreter::visitAllocaInst(AllocaInst &I) {
 
 	// pts-to analysis
 	Variable* ptr = variableFactory.getMappedVar(&I);
-	Variable* tgt = ptsInit[ptr];
+	Variable* tgt = allocMap[ptr];
 	ptsGraph.update(ptr, tgt);
 
 	if (tgt->getType() != ADDR_TAKEN)

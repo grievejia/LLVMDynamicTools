@@ -202,6 +202,19 @@ bool PtsSet::remove(Variable* v)
 		return false;
 }
 
+bool PtsSet::unionWith(const PtsSet other)
+{
+//	errs() << "We are here!\n";
+	if (this->contains(other))
+		return false;
+	else
+	{
+		if (value->isShared())
+			value = new PtsSetImpl(*value);
+		return ((value->ptsTo) |= (other.value)->ptsTo);
+	}
+}
+
 void PtsSet::toIndexVector (std::vector<unsigned>& vec) const
 {
 	for (PtsSet::iterator itr = (value->ptsTo).begin(), ite = (value->ptsTo).end(); itr != ite; ++itr)

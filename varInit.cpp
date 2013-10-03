@@ -5,10 +5,9 @@
 
 using namespace llvm;
 
+DenseMap<Variable*, Variable*> allocMap;
 // May not need this map. We'll see
 DenseMap<Function*, TopLevelVar*> retPtrMap;
-// Hold initial pts-to info before all variables are discovered	
-DenseMap<Variable*, Variable*> ptsInit;
 // Map llvm type to corresponding StructInfo
 DenseMap<const StructType*, StructInfo*> structInfoMap;
 // Initialize max struct info
@@ -86,7 +85,7 @@ Variable* ConstGEPtoVariable(ConstantExpr* exp)
 		else
 			assert(false && "GEP into unsupported data type");
 	}
-	errs() << "offset = " << offset << "\n";
+	//errs() << "offset = " << offset << "\n";
 	
 	// Finally, use that offset to select the corresponding variable
 	PointerType* trueType = cast<PointerType>(basePtr->getType());
@@ -114,10 +113,10 @@ Variable* ConstGEPtoVariable(ConstantExpr* exp)
 		}
 	}
 	
-	errs() << "fieldNum = " << fieldNum << "\n";
+	//errs() << "fieldNum = " << fieldNum << "\n";
 	assert((fieldNum == 0 || fieldNum < ((TopLevelVar*)baseVar)->getOffsetBound()) && "struct access out of bound!");
 	Variable* ret = variableFactory.getVariable(baseVar->getIndex() + fieldNum);
-	errs() << "return " << *ret << "\n";
+	//errs() << "return " << *ret << "\n";
 
 	return ret;
 }
@@ -183,13 +182,12 @@ void processGlobalInitializer(Variable* ptr, Constant* initializer)
 			{
 				Variable* other;
 				other = ConstGEPtoVariable(exp);
-				assert(ptsInit.count(other) && "initializing using an uninitialized variable");
-				ptsInit[ptsInit[ptr]] = ptsInit[other];
+				globalPtsCopy(ptr, other);
 				break;
 			}
 			case Instruction::IntToPtr:
 				// var will point to unknown target
-				ptsInit[ptsInit[ptr]] = variableFactory.getUnknownTarget();
+				globalPtsSet(ptr, variableFactory.getUnknownTarget());
 				break;
 			case Instruction::PtrToInt:
 				// Do nothing
@@ -221,20 +219,19 @@ void processGlobalInitializer(Variable* ptr, Constant* initializer)
 	}
 	else if (GlobalVariable* other = dyn_cast<GlobalVariable>(initializer))
 	{
-		DenseMap<Variable*, Variable*>::iterator itr = ptsInit.find(variableFactory.getMappedVar(other));
-		assert(itr != ptsInit.end() && "Global initializer variable not initialized!");
-		Variable* ptrTgt = ptsInit[ptr];
-		assert(ptrTgt != NULL && "Global variable no tgt?");
-		ptsInit[ptrTgt] = itr->second;
+		Variable* src = variableFactory.getMappedVar(other);
+		globalPtsCopy(ptr, src);
 		return;
 	}
 	else if (ConstantArray* a = dyn_cast<ConstantArray>(initializer))
 	{
-		// Just take the first element of the array
-		Value* op0 = a->getOperand(0);
-		Constant* cop0 = dyn_cast<Constant>(op0);
-		assert(cop0 != NULL);
-		processGlobalInitializer(ptr, cop0);
+		unsigned numOperands = a->getNumOperands();
+		for (unsigned i = 0; i < numOperands; ++i)
+		{
+			Value* op = a->getOperand(i);
+			Constant* cop = cast<Constant>(op);
+			processGlobalInitializer(ptr, cop);
+		}
 		return;
 	}
 	else if (isa<BlockAddress>(initializer) || isa<ConstantVector>(initializer))
@@ -289,7 +286,10 @@ void processStruct(Value* value, const StructType* structType, Function* f = NUL
 	{
 		AddrTakenVar* atVar = variableFactory.getNextAddrTakenVar(f == NULL, stInfo->isFieldArray(i), stSize - i);
 		TopLevelVar* topVar = fields[i];
-		ptsInit[topVar] = atVar;
+		if (f == NULL)
+			globalPtsSet(topVar, atVar);
+		else
+			allocMap[topVar] = atVar;
 		atVar->name = topVar->name + "_tgt";
 		variableFactory.setAllocSite(atVar, value);
 	}
@@ -328,7 +328,7 @@ void processGlobals(Module& M)
 			AddrTakenVar* atVar = variableFactory.getNextAddrTakenVar(true, isArray);
 			atVar->name = topVar->name + "_tgt";
 			variableFactory.setAllocSite(atVar, itr);
-			ptsInit[topVar] = atVar;
+			globalPtsSet(topVar, atVar);
 		}
 	}
 
@@ -337,7 +337,8 @@ void processGlobals(Module& M)
 		if (itr->hasInitializer())
 		{
 			Variable* ptr = variableFactory.getMappedVar(itr);
-			processGlobalInitializer(ptr, itr->getInitializer());
+			Variable* ptrTgt = globalPtsGet(ptr);
+			processGlobalInitializer(ptrTgt, itr->getInitializer());
 		}
 }
 
@@ -356,7 +357,7 @@ void processFunctionPointer(Function* f)
 		funObj->name = funPtr->name + "_tgt";
 		variableFactory.setAllocSite(funObj, f);
 		
-		ptsInit[funPtr] = funObj;
+		globalPtsSet(funPtr, funObj);
 		addressTakenFunctions.push_back(f);
 	}
 	
@@ -378,7 +379,7 @@ void processFunctionPointer(Function* f)
 		argvObj->name = "argv_tgt";
 		variableFactory.setAllocSite(argvObj, argv);
 		
-		ptsInit[argvPtr] = argvObj;
+		globalPtsSet(argvPtr, argvObj);
 	}
 	else
 	{
@@ -440,7 +441,7 @@ void visitFunction(Function* f)
 				allocObj->name = instPtr->name + "_tgt";
 				variableFactory.setAllocSite(allocObj, inst);
 				
-				ptsInit[instPtr] = allocObj;
+				allocMap[instPtr] = allocObj;
 			}
 		}
 		else if (PointerType* ptrType = dyn_cast<PointerType>(inst->getType()))
@@ -549,7 +550,7 @@ void analyzeStruct(Module& M)
 void variableInit(Module& M)
 {	
 	// Initialize unknow pointer
-	ptsInit[variableFactory.getPointerToUnknown()] = variableFactory.getUnknownTarget();
+	globalPtsSet(variableFactory.getPointerToUnknown(), variableFactory.getUnknownTarget());
 	
 	// Analyze all struct types in the program
 	analyzeStruct(M);
@@ -564,11 +565,4 @@ void variableInit(Module& M)
 	// Visit all functions to discover all variables
 	for (Module::iterator itr = M.begin(), ite = M.end(); itr != ite; ++itr)
 		visitFunction(&(*itr));
-
-/*	variableFactory.printFactoryInfo();
-	errs() << "ptsInit mapping:\n";
-	for (DenseMap<Variable*, Variable*>::iterator itr = ptsInit.begin(), ite = ptsInit.end(); itr != ite; ++itr)
-	{
-		errs() << *(itr->first) << "\t==>>\t" << *(itr->second) << "\n";
-	}*/
 }

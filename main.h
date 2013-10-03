@@ -34,4 +34,10 @@
 
 #include <map>
 
+#ifdef USE_DEBUG
+#define DBG_OUTPUT(x) x
+#else
+#define DBG_OUTPUT(x)
+#endif
+
 #endif

@@ -139,10 +139,7 @@ public:
 	// insert, remove and unionWith: return true iff the set is changed
 	bool insert(Variable* v);
 	bool remove(Variable* v);
-	bool unionWith(const PtsSet other)
-	{
-		return ((value->ptsTo) |= (other.value)->ptsTo);
-	}
+	bool unionWith(const PtsSet other);
 	
 	bool contains(const PtsSet other) const
 	{
