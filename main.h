@@ -1,6 +1,8 @@
 #ifndef MAIN_H
 #define MAIN_H
 
+//#define USE_DEBUG
+
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/User.h"
 #include "llvm/InstVisitor.h"

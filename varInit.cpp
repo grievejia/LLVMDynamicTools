@@ -129,7 +129,27 @@ Variable* ptrToVariable(Value* v)
 	if (isa<ConstantPointerNull>(v))
 		return variableFactory.getNullPointer();
 	else if (ConstantExpr* exp = dyn_cast<ConstantExpr>(v))
-		return ConstGEPtoVariable(exp);
+	{
+		switch (exp->getOpcode())
+		{
+			case Instruction::BitCast:
+				// BitCast is a no-op. Process its operand instead
+				return ptrToVariable(exp->getOperand(0));
+				break;
+			case Instruction::GetElementPtr:
+			{
+				return ConstGEPtoVariable(exp);
+				break;
+			}
+			case Instruction::IntToPtr:
+				// var will point to unknown target
+				return variableFactory.getPointerToUnknown();
+				break;
+			default:
+		   		assert(false && "unexpected global initializer constant expr type");
+		   		return NULL;
+		}
+	}
 	else
 		return variableFactory.getMappedVar(v);
 }

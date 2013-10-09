@@ -75,7 +75,7 @@ void MyInterpreter::callFunction(Function *F, const std::vector<GenericValue> &A
 		return;
 	}
 
-	if (extInfo.isExternal(F))
+	if (F->isDeclaration() && extInfo.isExternal(F))
 	{
 		ptsAnalyzeExtFunction(cs);
 		return;
@@ -1572,11 +1572,13 @@ void MyInterpreter::visitAllocaInst(AllocaInst &I) {
 
 	if (tgt->getType() != ADDR_TAKEN)
 		llvm_unreachable("Pointer to a top-level var?");
+	//errs() << "ptr = " << *ptr << " tgt = " << *tgt << " offsetBound = " << ((AddrTakenVar*)tgt)->getOffsetBound() << "\n";
 	unsigned bound = ((AddrTakenVar*)tgt)->getOffsetBound();
-	for (unsigned i = 0; i < bound; ++i)
+	for (unsigned i = 1; i < bound; ++i)
 	{
-		Variable* field = variableFactory.getVariable(ptr->getIndex() + i + 1);
-		Variable* fieldTgt = variableFactory.getVariable(tgt->getIndex() + i + 1);
+		Variable* field = variableFactory.getVariable(ptr->getIndex() + i);
+		Variable* fieldTgt = variableFactory.getVariable(tgt->getIndex() + i);
+		//errs() << "field = " << *field << ", fieldTgt = " << *fieldTgt << "\n";
 		ptsGraph.update(field, fieldTgt);
 	}
 
@@ -1595,6 +1597,7 @@ void MyInterpreter::visitGetElementPtrInst(GetElementPtrInst &I) {
 
 	std::vector<unsigned> indexVec;
 	srcTgt.toIndexVector(indexVec);
+	ptsGraph.update(dst, PtsSet());
 	for (std::vector<unsigned>::iterator itr = indexVec.begin(), ite = indexVec.end(); itr != ite; ++itr)
 	{
 		Variable* v = variableFactory.getVariable(*itr);

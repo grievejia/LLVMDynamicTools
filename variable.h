@@ -242,12 +242,14 @@ public:
 			return;
 		store.erase(ptr);
 	}
-	void printPtsSets()
+	void printPtsSets(bool noArg = false)
 	{
 		llvm::errs() << "----Print Pts-to set ----\n";
 		for (iterator itr = store.begin(), ite = store.end(); itr != ite; ++itr)
 		{
 			Variable* v = itr->first;
+			if (noArg && v->getType() == ARGUMENT)
+				continue;
 			PtsSet obj = itr->second;
 			llvm::errs() << *v << "  ==>>  {";
 

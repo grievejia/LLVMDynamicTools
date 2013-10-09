@@ -36,6 +36,22 @@ int main(int argc, char **argv, char * const *envp) {
 		return -1;
 	}
 
+	if (sys::DynamicLibrary::LoadLibraryPermanently("/lib/x86_64-linux-gnu/libc.so.6", &errMsg))
+	{
+		errs() << "Load libc error: " << errMsg << "\n";
+		return -1;
+	}
+	if (sys::DynamicLibrary::LoadLibraryPermanently("/lib/x86_64-linux-gnu/libm.so.6", &errMsg))
+	{
+		errs() << "Load libm error: " << errMsg << "\n";
+		return -1;
+	}
+	if (sys::DynamicLibrary::LoadLibraryPermanently("/usr/lib/x86_64-linux-gnu/libstdc++.so.6", &errMsg))
+	{
+		errs() << "Load libm error: " << errMsg << "\n";
+		return -1;
+	}
+
 	// Initialize variables
 	layoutInfo = new DataLayout(module);
 	variableInit(*module);
@@ -54,7 +70,7 @@ int main(int argc, char **argv, char * const *envp) {
 	int retValue = interp->runFunctionAsMain(startFunc, Argv, envp);
 //	errs() << "Interpreter returns " << retValue << "\n";
 
-	ptsGraph.printPtsSets();
+	ptsGraph.printPtsSets(true);
 
 	DBG_OUTPUT(errs() << "Bye-bye!\n";)
 

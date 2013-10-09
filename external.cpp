@@ -165,7 +165,9 @@ static bool ffiInvoke(RawFunc Fn, Function *F, const std::vector<GenericValue> &
 	Type *RetTy = FTy->getReturnType();
 	ffi_type *rtype = ffiTypeFor(RetTy);
 
-	if (ffi_prep_cif(&cif, FFI_DEFAULT_ABI, NumArgs, rtype, &args[0]) == FFI_OK) {
+	ffi_status ret = ffi_prep_cif(&cif, FFI_DEFAULT_ABI, NumArgs, rtype, &args[0]);
+
+	if (ret == FFI_OK) {
 		SmallVector<uint8_t, 128> ret;
 		if (RetTy->getTypeID() != Type::VoidTyID)
 			ret.resize(TD->getTypeStoreSize(RetTy));
