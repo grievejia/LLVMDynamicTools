@@ -1,0 +1,2 @@
+add_subdirectory(LLVMInterpreter)
+add_subdirectory(LLVMFuzzer)
