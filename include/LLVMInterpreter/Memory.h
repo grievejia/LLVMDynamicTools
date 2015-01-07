@@ -10,6 +10,27 @@
 namespace llvm_interpreter
 {
 
+class MemoryRegion
+{
+private:
+	using MemPair = std::pair<Address, DynamicValue>;
+	using MemPairVec = std::vector<MemPair>;
+
+	MemPairVec vec;
+
+	MemoryRegion() = default;
+public:
+	using const_iterator = MemPairVec::const_iterator;
+
+	unsigned getNumEntry() const { return vec.size(); }
+	unsigned isEmpty() const { return vec.empty(); }
+
+	const_iterator begin() const { return vec.begin(); }
+	const_iterator end() const { return vec.end(); }
+
+	friend class MemorySection;
+};
+
 class MemorySection
 {
 private:
@@ -42,16 +63,15 @@ public:
 
 	DynamicValue& read(Address addr)
 	{
-		auto itr = mem.lower_bound(addr);
-		if (itr == mem.end())
-			throw std::out_of_range("read() accesses an unmapped address");
+		auto itr = std::prev(mem.upper_bound(addr));
 
-		if (itr->first == addr)
-			return itr->second;
-		else if (!itr->second.isAggregateValue())
+		// Aggregates(except for vectors, which we don't support) are not first-class values. Therefore, we cannot read any aggregates directly
+		if (itr->second.isAggregateValue())
+			return itr->second.getValueAtOffset(addr - itr->first);
+		else if (itr->first != addr)
 			throw std::out_of_range("read() offsets into a scalar value");
 		else
-			return itr->second.getValueAtOffset(addr - itr->first);
+			return itr->second;
 	}
 
 	DynamicValue readInitialize(Address addr, DynamicValue&& val)
@@ -69,16 +89,15 @@ public:
 
 	void write(Address addr, DynamicValue&& val)
 	{
-		auto itr = mem.lower_bound(addr);
-		if (itr == mem.end())
-			throw std::out_of_range("write() accesses an unmapped address");
+		auto itr = std::prev(mem.upper_bound(addr));
 
-		if (itr->first == addr)
-			insertOrAssign(addr, std::move(val));
-		else if (itr->second.isAggregateValue())
-			throw std::out_of_range("read() offsets into a scalar value");
-		else
+		// Aggregates(except for vectors, which we don't support) are not first-class values. Therefore, we cannot overwrite any aggregates directly
+		if (itr->second.isAggregateValue())
 			itr->second.getValueAtOffset(addr - itr->first) = std::move(val);
+		else if (itr->first != addr)
+			throw std::out_of_range("write() offsets into a scalar value");
+		else
+			itr->second = std::move(val);
 	}
 
 	Address allocate(unsigned size)
@@ -96,6 +115,14 @@ public:
 		mem.erase(mem.lower_bound(nextAddr), mem.end());
 	}
 
+	void free(Address addr)
+	{
+		auto itr = mem.find(addr);
+		if (itr == mem.end())
+			throw std::out_of_range("free() received invalid address");
+		mem.erase(itr);
+	}
+
 	Address allocateAndInitialize(unsigned size, DynamicValue&& val)
 	{
 		auto allocatedAddr = nextAddr;
@@ -104,6 +131,36 @@ public:
 		insertOrAssign(allocatedAddr, std::move(val));
 		return allocatedAddr;
 	}
+
+	MemoryRegion readMemoryRegion(Address addr, unsigned size) const
+	{
+		assert(addr < nextAddr);
+
+		auto retRegion = MemoryRegion();
+		auto endAddr = addr + size;
+		auto itr = std::prev(mem.upper_bound(addr));
+		for (auto ite = mem.end(); itr != ite; ++itr)
+		{
+			if (itr->first >= endAddr)
+				break;
+			retRegion.vec.emplace_back(itr->first - addr, itr->second);
+		}
+
+		return retRegion;
+	}
+
+	void writeMemoryRegion(Address addr, MemoryRegion&& memRegion)
+	{
+		// Remove old mappings
+		for (auto const& mapping: memRegion.vec)
+			mem.erase(mapping.first);
+
+		// Insert new mappings
+		for (auto& mapping: memRegion.vec)
+			insertOrAssign(mapping.first + addr, std::move(mapping.second));
+	}
+
+	void dumpMemory() const;
 };
 
 }

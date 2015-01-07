@@ -7,13 +7,16 @@ namespace llvm
 {
 	class Module;
 	class Function;
+	class BasicBlock;
 	class StringRef;
+	class FunctionType;
 }
 
 namespace llvm_fuzzer
 {
 
 class Random;
+class GeneratorEnvironment;
 
 class ProgramGenerator
 {
@@ -22,13 +25,18 @@ private:
 	Random& randomGenerator;
 
 	// Generate a new function with a single empty basic block
-	llvm::Function* getEmptyFunction(llvm::StringRef funName);
-	// Fill random instructions inside the given function. No control flow is added
-	void fillFunction(llvm::Function* f);
-	// Once the given function is filled, randomly turn the compare instructions into branches and loops
-	void introduceControlFlow(llvm::Function* f);
+	llvm::Function* getEmptyFunction(llvm::StringRef funName, llvm::FunctionType* funType);
 
-	llvm::Function* generateRandomFunction(llvm::StringRef funName);
+	// Fill a basic block with only stack allocations. Return a new basic block
+	void generateAllocationBlock(llvm::BasicBlock* bb, GeneratorEnvironment& env);
+	llvm::BasicBlock* generateFunctionBody(llvm::BasicBlock* bb, GeneratorEnvironment& env);
+	//void generateSequentialBlock(llvm::BasicBlock* bb, BlockGenerator& bg);
+	//void generateConditionalBlock(llvm::BasicBlock* bb, BlockGenerator& bg);
+	//void generateLoopBlock(llvm::BasicBlock* bb, BlockGenerator& bg);
+
+	// Fill random instructions inside the given function. No control flow is added
+
+	llvm::Function* generateRandomFunction(llvm::StringRef funName, llvm::FunctionType* funType, GeneratorEnvironment& env);
 	void generateMainFunction(llvm::Function* entryFunc);
 public:
 	ProgramGenerator(std::unique_ptr<llvm::Module> m, Random& r);

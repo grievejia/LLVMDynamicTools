@@ -3,12 +3,62 @@
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/GlobalAlias.h"
 #include "llvm/IR/Operator.h"
+#include "llvm/IR/PatternMatch.h"
 #include "llvm/Support/raw_ostream.h"
 
 #include <cmath>
 
 using namespace llvm;
 using namespace llvm_interpreter;
+
+static Value* findBasePointer(const Value* val)
+{
+	if (auto itp = cast<IntToPtrInst>(val))
+	{
+		Value* srcValue = nullptr;
+		auto op = itp->getOperand(0);
+		if (PatternMatch::match(op, PatternMatch::m_PtrToInt(PatternMatch::m_Value(srcValue))))
+		{
+			return srcValue->stripPointerCasts();
+		}
+		else if (PatternMatch::match(op,
+				PatternMatch::m_Add(
+					PatternMatch::m_PtrToInt(
+					PatternMatch::m_Value(srcValue)),
+				PatternMatch::m_Value())))
+		{
+			return srcValue->stripPointerCasts();
+		}
+	}
+	
+	llvm_unreachable("Unhandled case for findBasePointer()");
+}
+
+const DynamicValue& Interpreter::readFromPointer(const PointerValue& ptr)
+{
+	switch (ptr.getAddressSpace())
+	{
+		case PointerAddressSpace::GLOBAL_SPACE:
+			return globalMem.read(ptr.getAddress());
+		case PointerAddressSpace::STACK_SPACE:
+			return stackMem.read(ptr.getAddress());
+		case PointerAddressSpace::HEAP_SPACE:
+			return heapMem.read(ptr.getAddress());
+	}
+}
+
+void Interpreter::writeToPointer(const PointerValue& ptr, DynamicValue&& val)
+{
+	switch (ptr.getAddressSpace())
+	{
+		case PointerAddressSpace::GLOBAL_SPACE:
+			return globalMem.write(ptr.getAddress(), std::move(val));
+		case PointerAddressSpace::STACK_SPACE:
+			return stackMem.write(ptr.getAddress(), std::move(val));
+		case PointerAddressSpace::HEAP_SPACE:
+			return heapMem.write(ptr.getAddress(), std::move(val));
+	}
+}
 
 DynamicValue Interpreter::evaluateConstant(const llvm::Constant* cv)
 {
@@ -48,6 +98,7 @@ DynamicValue Interpreter::evaluateConstant(const llvm::Constant* cv)
 					if (elemType->isAggregateType())
 						arrayVal.setElementAtIndex(i, evaluateConstant(UndefValue::get(elemType)));
 				}
+				return std::move(retVal);
 			}
 			else if (type->isVectorTy())
 				llvm_unreachable("Vector type not supported");
@@ -63,12 +114,42 @@ DynamicValue Interpreter::evaluateConstant(const llvm::Constant* cv)
 		{
 			auto glbVar = cast<GlobalValue>(cv);
 			auto globalAddr = globalEnv.at(glbVar);
-			return DynamicValue::getPointerValue(globalAddr);
+			return DynamicValue::getPointerValue(PointerAddressSpace::GLOBAL_SPACE, globalAddr);
 		}
 		case Value::ConstantAggregateZeroVal:
 		{
 			auto caz = cast<ConstantAggregateZero>(cv);
-			return evaluateConstant(caz->getSequentialElement());
+			auto type = cv->getType();
+			if (type->isStructTy())
+			{
+				auto stType = cast<StructType>(type);
+				auto stLayout = dataLayout.getStructLayout(stType);
+
+				auto retVal = DynamicValue::getStructValue(dataLayout.getTypeAllocSize(stType));
+				auto& structVal = retVal.getAsStructValue();
+				for (auto i = 0u, e = stType->getNumElements(); i < e; ++i)
+				{
+					auto offset = stLayout->getElementOffset(i);
+					structVal.addField(offset, evaluateConstant(caz->getStructElement(i)));
+				}
+				return std::move(retVal);
+			}
+			else if (type->isArrayTy())
+			{
+				auto arrayType = cast<ArrayType>(type);
+				auto elemType = arrayType->getElementType();
+				auto arraySize = arrayType->getNumElements();
+
+				auto retVal = DynamicValue::getArrayValue(arraySize, dataLayout.getTypeAllocSize(elemType));
+				auto& arrayVal = retVal.getAsArrayValue();
+				for (unsigned i = 0; i < arraySize; ++i)
+				{
+					arrayVal.setElementAtIndex(i, evaluateConstant(caz->getSequentialElement()));
+				}
+				return std::move(retVal);
+			}
+			else
+				llvm_unreachable("ConstantAggregateZero not an array or a struct?");
 		}
 		case Value::ConstantDataArrayVal:
 		{
@@ -118,11 +199,17 @@ DynamicValue Interpreter::evaluateConstant(const llvm::Constant* cv)
 			return retVal;
 		}
 		case Value::ConstantPointerNullVal:
-			return DynamicValue::getPointerValue(0);
+			return DynamicValue::getPointerValue(PointerAddressSpace::GLOBAL_SPACE, 0);
 		case Value::ConstantExprVal:
 		{
 			auto cExpr = cast<ConstantExpr>(cv);
 			return evaluateConstantExpr(cExpr);
+		}
+		case Value::FunctionVal:
+		{
+			auto fun = cast<Function>(cv);
+			auto funAddr = globalEnv.at(fun);
+			return DynamicValue::getPointerValue(PointerAddressSpace::GLOBAL_SPACE, funAddr);
 		}
 	}
 
@@ -245,7 +332,7 @@ DynamicValue Interpreter::evaluateConstantExpr(const llvm::ConstantExpr* cexpr)
 		{
 			auto srcVal = evaluateConstant(cexpr->getOperand(0));
 			auto ptrSize = dataLayout.getPointerSizeInBits();
-			return DynamicValue::getPointerValue(srcVal.getAsIntValue().getInt().zextOrTrunc(ptrSize).getZExtValue());
+			return DynamicValue::getPointerValue(PointerAddressSpace::GLOBAL_SPACE, srcVal.getAsIntValue().getInt().zextOrTrunc(ptrSize).getZExtValue());
 		}
 		case Instruction::BitCast:
 		{
@@ -559,7 +646,7 @@ DynamicValue Interpreter::evaluateConstantExpr(const llvm::ConstantExpr* cexpr)
 			auto offsetInt = APInt(dataLayout.getPointerSizeInBits(), 0);
 			cast<GEPOperator>(cexpr)->accumulateConstantOffset(dataLayout, offsetInt);
 
-			auto basePtrVal = baseVal.getAsPointerValue();
+			auto& basePtrVal = baseVal.getAsPointerValue();
 			basePtrVal.setAddress(basePtrVal.getAddress() + offsetInt.getZExtValue());
 			return std::move(baseVal);
 		}
@@ -604,7 +691,7 @@ DynamicValue Interpreter::evaluateConstantExpr(const llvm::ConstantExpr* cexpr)
 					baseVal = std::move(elemVal);
 				}
 				else
-					llvm_unreachable("extractvalue into a non-aggregate value!");
+					llvm_unreachable("insertvalue into a non-aggregate value!");
 			}
 			baseVal = evaluateConstant(cexpr->getOperand(1));
 
@@ -1030,7 +1117,17 @@ void Interpreter::evaluateInstruction(StackFrame& frame, const llvm::Instruction
 		{
 			auto srcVal = evaluateOperand(frame, inst->getOperand(0));
 			auto ptrSize = dataLayout.getPointerSizeInBits();
-			auto resVal = DynamicValue::getPointerValue(srcVal.getAsIntValue().getInt().zextOrTrunc(ptrSize).getZExtValue());
+
+			// Look for matching ptrtoint to decide what the address space should be
+			auto addrSpace = PointerAddressSpace::GLOBAL_SPACE;
+			auto matchingPtr = findBasePointer(inst);
+			if (matchingPtr != nullptr && frame.hasBinding(matchingPtr))
+			{
+				auto& ptrVal = frame.lookup(matchingPtr).getAsPointerValue();
+				addrSpace = ptrVal.getAddressSpace();
+			}
+
+			auto resVal = DynamicValue::getPointerValue(addrSpace, srcVal.getAsIntValue().getInt().zextOrTrunc(ptrSize).getZExtValue());
 			frame.insertBinding(inst, std::move(resVal));
 			break;
 		}
@@ -1103,11 +1200,11 @@ void Interpreter::evaluateInstruction(StackFrame& frame, const llvm::Instruction
 			}
 
 			auto allocSize = dataLayout.getTypeAllocSize(allocInst->getType()->getElementType());
-			auto retAddr = allocateStackMem(frame, allocSize);
+			auto retAddr = allocateStackMem(frame, allocSize, allocInst->getType()->getElementType());
 			for (auto i = 1; i < allocElems; ++i)
-				allocateStackMem(frame, allocSize);
+				allocateStackMem(frame, allocSize, allocInst->getType()->getElementType());
 
-			frame.insertBinding(inst, DynamicValue::getPointerValue(retAddr));
+			frame.insertBinding(inst, DynamicValue::getPointerValue(PointerAddressSpace::STACK_SPACE, retAddr));
 
 			break;
 		}
@@ -1116,11 +1213,9 @@ void Interpreter::evaluateInstruction(StackFrame& frame, const llvm::Instruction
 			auto loadInst = cast<LoadInst>(inst);
 
 			auto loadSrc = evaluateOperand(frame, loadInst->getPointerOperand());
-			auto loadAddr = loadSrc.getAsPointerValue().getAddress();
+			auto& loadPtr = loadSrc.getAsPointerValue();
 
-			// loadAddr may come from a GEP. So we can't do an exactRead()
-			auto resVal = stackMem.read(loadAddr);
-
+			auto resVal = readFromPointer(loadPtr);
 			frame.insertBinding(inst, std::move(resVal));
 
 			break;
@@ -1131,10 +1226,9 @@ void Interpreter::evaluateInstruction(StackFrame& frame, const llvm::Instruction
 
 			auto storeSrc = evaluateOperand(frame, storeInst->getPointerOperand());
 			auto storeVal = evaluateOperand(frame, storeInst->getValueOperand());
-			auto storeAddr = storeSrc.getAsPointerValue().getAddress();
+			auto& storePtr = storeSrc.getAsPointerValue();
 
-			// storeAddr may come from a GEP. So we can't do an exactWrite()
-			stackMem.write(storeAddr, std::move(storeVal));
+			writeToPointer(storePtr, std::move(storeVal));
 
 			break;
 		}
@@ -1174,6 +1268,7 @@ void Interpreter::evaluateInstruction(StackFrame& frame, const llvm::Instruction
 			auto evInst = cast<ExtractValueInst>(inst);
 
 			auto baseVal = evaluateOperand(frame, evInst->getAggregateOperand());
+
 			for (auto itr = evInst->idx_begin(), ite = evInst->idx_end(); itr != ite; ++itr)
 			{
 				auto idx = *itr;
@@ -1214,7 +1309,7 @@ void Interpreter::evaluateInstruction(StackFrame& frame, const llvm::Instruction
 					baseVal = std::move(elemVal);
 				}
 				else
-					llvm_unreachable("extractvalue into a non-aggregate type!");
+					llvm_unreachable("insertvalue into a non-aggregate type!");
 			}
 			baseVal = evaluateOperand(frame, ivInst->getInsertedValueOperand());
 			
@@ -1251,7 +1346,7 @@ void Interpreter::evaluateInstruction(StackFrame& frame, const llvm::Instruction
 			for (auto itr = cs.arg_begin(), ite = cs.arg_end(); itr != ite; ++itr)
 				argVals.push_back(evaluateOperand(frame, *itr));
 
-			auto retVal = callFunction(callTgt, std::move(argVals));
+			auto retVal = (callTgt->isDeclaration()) ? callExternalFunction(cs, callTgt, std::move(argVals)) : callFunction(callTgt, std::move(argVals));
 			if (!callTgt->getReturnType()->isVoidTy())
 				frame.insertBinding(inst, std::move(retVal));
 

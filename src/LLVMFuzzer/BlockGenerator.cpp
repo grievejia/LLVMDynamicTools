@@ -1,4 +1,5 @@
-#include "Modifier.h"
+#include "BlockGenerator.h"
+#include "GeneratorEnvironment.h"
 #include "Random.h"
 
 #include "llvm/IR/Instructions.h"
@@ -7,45 +8,82 @@
 using namespace llvm;
 using namespace llvm_fuzzer;
 
-void Modifier::addAllocaInst()
+Value* BlockGenerator::getRandomOperand()
 {
-	auto randType = valuePool.getRandomType();
+	auto randVal = valueGenerator.getRandomValue();
+	if (randVal->getType()->isPointerTy() && env.getPointsToTarget(randVal).isValid())
+	{
+		// With 1/3 probability, dereference that pointer
+		if (randomGenerator.getRandomBool(3))
+		{
+			randVal = builder.CreateLoad(randVal, "ldvar");
+			env.addValue(randVal);
+		}
+	}
+	return randVal;
+}
+
+Value* BlockGenerator::getRandomOperandOfType(Type* type)
+{
+	auto opSize = env.getNumValueOfType(type);
+	auto ptrType = PointerType::getUnqual(type);
+	auto ptrSize = env.getNumValueOfType(ptrType);
+
+	if (opSize + ptrSize == 0)
+		return valueGenerator.getRandomValueOfType(type);
+
+	auto idx = randomGenerator.getRandomUInt32(0, opSize + ptrSize - 1);
+	if (idx < opSize)
+		return valueGenerator.getRandomValueOfType(type);
+
+	idx -= opSize;
+	auto ptr = valueGenerator.getRandomValueOfType(ptrType);
+	if (env.getPointsToTarget(ptr).isValid())
+		return builder.CreateLoad(ptr);
+	else
+		return valueGenerator.getRandomValueOfType(type);
+}
+
+Value* BlockGenerator::addAllocaInst()
+{
+	auto randType = valueGenerator.getRandomScalarType();
 	// FIXME: create array-based alloca
 	auto allocInst = builder.CreateAlloca(randType, nullptr, "avar");
-	valuePool.addValue(allocInst, false);
+	env.addValue(allocInst);
+	builder.CreateStore(valueGenerator.getRandomValueOfType(randType), allocInst);
+	env.recordStore(allocInst);
 
 	// With 1/3 probability, create a pointer on top of the allocated value
 	// FIXME: make that prob. tunable
+	auto retInst = allocInst;
 	while (randomGenerator.getRandomBool(3))
 	{
 		auto allocPtrInst = builder.CreateAlloca(PointerType::getUnqual(randType), nullptr, "aptr");
-		valuePool.addValue(allocPtrInst, false);
+		builder.CreateStore(allocInst, allocPtrInst);
+		env.addValue(allocPtrInst);
+		env.recordStore(allocInst, allocPtrInst);
 		randType = allocPtrInst->getAllocatedType();
+		allocInst = allocPtrInst;
 	}
+	return retInst;
 }
 
-void Modifier::addStoreInst()
+Value* BlockGenerator::addStoreInst()
 {
-	auto randPtr = valuePool.samplePointerFromPool();
+	auto randPtr = valueGenerator.getRandomPointer();
 
 	auto elemType = cast<PointerType>(randPtr->getType())->getElementType();
-	auto randVal = valuePool.getRandomValueOfType(elemType);
+	auto randVal = getRandomOperandOfType(elemType);
 
-	builder.CreateStore(randVal, randPtr);
-	valuePool.addValue(randPtr);
+	auto storeInst = builder.CreateStore(randVal, randPtr);
+	env.recordStore(randVal, randPtr);
+	return storeInst;
 }
 
-void Modifier::addLoadInst()
+Value* BlockGenerator::addBinaryInst()
 {
-	auto randValidPtr = valuePool.samplePointerFromPool(true);
-	auto loadInst = builder.CreateLoad(randValidPtr, "lvar");
-	valuePool.addValue(loadInst, false);
-}
-
-void Modifier::addBinaryInst()
-{
-	auto op0 = valuePool.sampleScalarFromPool();
-	auto op1 = valuePool.getRandomValueOfType(op0->getType());
+	auto op0 = valueGenerator.getRandomScalar();
+	auto op1 = getRandomOperandOfType(op0->getType());
 
 	auto randOpInt = randomGenerator.getRandomUInt32() % 17u;
 	Value* retInst = nullptr;
@@ -122,7 +160,7 @@ void Modifier::addBinaryInst()
 		}
 		case 16:
 		{
-			auto condVal = valuePool.sampleScalarFromPool();
+			auto condVal = valueGenerator.getRandomScalar();
 			auto boolType = Type::getInt1Ty(bb->getContext());
 			if (condVal->getType() != boolType)
 				condVal = addCastInst(condVal, boolType);
@@ -133,20 +171,33 @@ void Modifier::addBinaryInst()
 			llvm_unreachable("Unhandled binary inst");
 	}
 
-	valuePool.addValue(retInst);
+	env.addValue(retInst);
+	return retInst;
 }
 
-void Modifier::addCmpInst()
+Value* BlockGenerator::addCmpInst()
 {
-	auto op0 = valuePool.sampleScalarFromPool();
-	auto op1 = valuePool.getRandomValueOfType(op0->getType());
+	auto op0 = valueGenerator.getRandomScalar();
+	auto op1 = getRandomOperandOfType(op0->getType());
 
 	auto predInt = randomGenerator.getRandomUInt32(CmpInst::FIRST_ICMP_PREDICATE, CmpInst::LAST_ICMP_PREDICATE);
 	auto retInst = builder.CreateICmp(static_cast<CmpInst::Predicate>(predInt), op0, op1, "cmp");
-	valuePool.addValue(retInst);
+	env.addValue(retInst);
+	return retInst;
 }
 
-Value* Modifier::addCastInst(Value* val, Type* dstType)
+static bool isCastSafe(Type* srcType, Type* dstType)
+{
+	if (srcType == dstType)
+		return true;
+
+	if (isa<IntegerType>(srcType) && isa<IntegerType>(dstType))
+		return true;
+
+	return false;
+}
+
+Value* BlockGenerator::addCastInst(Value* val, Type* dstType)
 {
 	auto srcType = val->getType();
 	if (srcType == dstType)
@@ -158,7 +209,7 @@ Value* Modifier::addCastInst(Value* val, Type* dstType)
 			llvm_unreachable("Illegal cast from pointer to non-pointer");
 
 		auto castInst = builder.CreateBitCast(val, dstType, val->getName() + ".cast");
-		valuePool.addValue(castInst);
+		env.addValue(castInst);
 		return castInst;
 	}
 
@@ -171,13 +222,13 @@ Value* Modifier::addCastInst(Value* val, Type* dstType)
 			if (srcWidth > dstWidth)
 			{
 				auto castInst = builder.CreateTrunc(val, dstIntType, val->getName() + ".trunc");
-				valuePool.addValue(castInst);
+				env.addValue(castInst);
 				return castInst;
 			}
 			else
 			{
 				auto castInst = randomGenerator.getRandomBool() ? builder.CreateSExt(val, dstIntType, val->getName() + ".sext") : builder.CreateZExt(val, dstIntType, val->getName() + ".zext");
-				valuePool.addValue(castInst);
+				env.addValue(castInst);
 				return castInst;
 			}
 		}
@@ -188,34 +239,32 @@ Value* Modifier::addCastInst(Value* val, Type* dstType)
 	llvm_unreachable("Unhandled cast case");
 }
 
-void Modifier::addReturnInst()
+Value* BlockGenerator::addReturnInst(Type* retType)
 {
 	auto itr = bb->rbegin();
 	for (auto ite = bb->rend(); itr != ite; ++itr)
 	{
 		auto instType = itr->getType();
-		if (instType->isSingleValueType() && !instType->isPointerTy())
-			break;
+		if (isCastSafe(instType, retType))
+			return builder.CreateRet(addCastInst(&*itr, retType));
 	}
-	if (itr == bb->rend())
-		builder.CreateRet(valuePool.getRandomValueOfType(Type::getInt32Ty(bb->getContext())));
-	else
-		builder.CreateRet(addCastInst(&*itr, Type::getInt32Ty(bb->getContext())));
+
+	// If we can't find an instruction in the current block with type retType, randomly return a value of retType from the environment
+	return builder.CreateRet(valueGenerator.getRandomValueOfType(retType));
 }
 
-void Modifier::addAllocations(unsigned numAlloc)
+void BlockGenerator::addAllocations(unsigned numAlloc)
 {
 	for (auto i = 0; i < numAlloc; ++i)
 		addAllocaInst();
 }
 
-void Modifier::addOperations(unsigned numOps)
+void BlockGenerator::addOperations(unsigned numOps)
 {
 	auto counter = 0u;
-	auto numStore = 0u, numLoad = 0u;
 	while (counter < numOps)
 	{
-		auto opTypeInt = randomGenerator.getRandomUInt32(0, 4);
+		auto opTypeInt = randomGenerator.getRandomUInt32(0, 3);
 		switch (opTypeInt)
 		{
 			case 0:
@@ -224,18 +273,8 @@ void Modifier::addOperations(unsigned numOps)
 				break;
 			case 2:
 				addStoreInst();
-				++numStore;
 				break;
 			case 3:
-				if (numLoad < numStore)
-				{
-					++numLoad;
-					addLoadInst();
-				}
-				else
-					continue;
-				break;
-			case 4:
 				addCmpInst();
 				break;
 			default:

@@ -1,16 +1,18 @@
+#include "BlockGenerator.h"
+#include "GeneratorEnvironment.h"
 #include "ProgramGenerator.h"
 #include "Random.h"
-#include "Modifier.h"
 
 #include "llvm/IR/Function.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Module.h"
+#include "llvm/Support/CommandLine.h"
 #include "llvm/Support/raw_ostream.h"
-
-#include <algorithm>
 
 using namespace llvm;
 using namespace llvm_fuzzer;
+
+static cl::opt<unsigned> FunctionAllocSize("asize", cl::desc("Approximately how many allocation instructions should be generated for each function"), cl::init(10));
 
 ProgramGenerator::ProgramGenerator(std::unique_ptr<llvm::Module> m, Random& r): module(std::move(m)), randomGenerator(r)
 {
@@ -18,79 +20,56 @@ ProgramGenerator::ProgramGenerator(std::unique_ptr<llvm::Module> m, Random& r): 
 }
 ProgramGenerator::~ProgramGenerator() = default;
 
-Function* ProgramGenerator::getEmptyFunction(StringRef funName)
+Function* ProgramGenerator::getEmptyFunction(StringRef funName, FunctionType* funType)
 {
-	auto argTypes = std::vector<Type*>();
-
-	auto funType = FunctionType::get(Type::getInt32Ty(module->getContext()), argTypes, 0);
 	auto retFun = Function::Create(funType, GlobalValue::ExternalLinkage, funName, module.get());
+	BasicBlock::Create(retFun->getContext(), "entry", retFun);
 
 	return retFun;
 }
 
-void ProgramGenerator::fillFunction(Function* f)
+void ProgramGenerator::generateAllocationBlock(BasicBlock* bb, GeneratorEnvironment& env)
 {
-	// Create a legal entry block.
-	auto bb = BasicBlock::Create(f->getContext(), "bb", f);
-	auto instGenerator = Modifier(bb, randomGenerator);
-
-	instGenerator.addAllocations(10);
-	instGenerator.addOperations(50);
-	instGenerator.addReturnInst();
+	auto numAlloc = std::lround(FunctionAllocSize * randomGenerator.getRandomDoubleWithNormalDist(1.0, 0.15));
+	
+	BlockGenerator blockGen(bb, env, randomGenerator);
+	blockGen.addAllocations(numAlloc);
 }
 
-void ProgramGenerator::introduceControlFlow(Function* f)
+BasicBlock* ProgramGenerator::generateFunctionBody(BasicBlock* bb, GeneratorEnvironment& env)
 {
-	auto boolInsts = std::vector<Instruction*>();
-	auto boolType = IntegerType::getInt1Ty(f->getContext());
-	for (auto itr = inst_begin(f), ite = inst_end(f); itr != ite; ++itr)
-	{
-		if (itr->getType() == boolType)
-			boolInsts.push_back(itr.getInstructionIterator());
-	}
+	BlockGenerator blockGen(bb, env, randomGenerator);
 
-	std::random_shuffle(boolInsts.begin(), boolInsts.end(),
-		[this] (auto n)
-		{
-			return randomGenerator.getRandomUInt64(0, n - 1);
-		}
-	);
+	blockGen.addOperations(50);
 
-	auto entryBlock = &f->getEntryBlock();
-	for (auto inst: boolInsts)
-	{
-		auto srcBB = inst->getParent();
-		auto dstBB = srcBB->splitBasicBlock(inst, "bb_split");
-		inst->moveBefore(srcBB->getTerminator());
-		if (isa<BranchInst>(srcBB->getTerminator()) && srcBB != entryBlock)
-		{
-			BranchInst::Create(srcBB, dstBB, inst, srcBB->getTerminator());
-			srcBB->getTerminator()->eraseFromParent();
-			
-		}
-		//	branchInst->setCondition(inst);
-	}
+	return bb;
 }
 
-Function* ProgramGenerator::generateRandomFunction(StringRef funName)
+Function* ProgramGenerator::generateRandomFunction(StringRef funName, FunctionType* funType, GeneratorEnvironment& env)
 {
-	auto f = getEmptyFunction(funName);
+	auto f = getEmptyFunction(funName, funType);
 
-	// Generate lots of random instructions inside a single basic block
-	fillFunction(f);
+	// Generate a bunch of stack allocations
+	generateAllocationBlock(f->begin(), env);
 
-	// Break the basic block into many loops
-	//introduceControlFlow(f);
+	// Generate the function body
+	auto bodyBlock = BasicBlock::Create(f->getContext(), "body", f);
+	BranchInst::Create(bodyBlock, f->begin());
+	auto finalBlock = generateFunctionBody(bodyBlock, env);
+
+	// Generate return instruction
+	BlockGenerator(finalBlock, env, randomGenerator).addReturnInst(funType->getReturnType());
 	
 	return f;
 }
 
 void ProgramGenerator::generateMainFunction(Function* entryFunc)
 {
-	auto mainFun = getEmptyFunction("main");
+	auto mainType = FunctionType::get(Type::getInt32Ty(module->getContext()), false);
+	auto mainFun = getEmptyFunction("main", mainType);
 
 	// The main function just do one thing: call the generated entry function
-	auto bb = BasicBlock::Create(mainFun->getContext(), "bb", mainFun);
+	auto bb = mainFun->begin();
 	IRBuilder<> builder(bb);
 	auto callInst = builder.CreateCall(entryFunc, "main.ret");
 	builder.CreateRet(callInst);
@@ -98,6 +77,9 @@ void ProgramGenerator::generateMainFunction(Function* entryFunc)
 
 void ProgramGenerator::generateRandomProgram()
 {
-	auto entryFunc = generateRandomFunction("autogen_func");
+	auto entryType = FunctionType::get(Type::getInt32Ty(module->getContext()), false);
+
+	auto globalEnv = GeneratorEnvironment::getEmptyEnvironment(module->getContext());
+	auto entryFunc = generateRandomFunction("autogen_entry", entryType, globalEnv);
 	generateMainFunction(entryFunc);
 }

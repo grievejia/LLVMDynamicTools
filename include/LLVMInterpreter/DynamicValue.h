@@ -92,17 +92,26 @@ public:
 };
 
 // Pointer value
+enum class PointerAddressSpace: std::uint8_t
+{
+	GLOBAL_SPACE,
+	STACK_SPACE,
+	HEAP_SPACE
+};
+
 class PointerValue: public DynamicValueConcept
 {
 private:
+	PointerAddressSpace addrSpace;
 	Address ptr;
 	PointerValue* clone() const override;
 
-	explicit PointerValue(Address a): DynamicValueConcept(DynamicValueType::POINTER_VALUE), ptr(a) {}
+	PointerValue(PointerAddressSpace s, Address a): DynamicValueConcept(DynamicValueType::POINTER_VALUE), addrSpace(s), ptr(a) {}
 
 	std::string toString() const override;
 public:
 	Address getAddress() const { return ptr; }
+	PointerAddressSpace getAddressSpace() const { return addrSpace; }
 	void setAddress(Address other) { ptr = other; }
 
 	static bool classof(const DynamicValueConcept* c)
@@ -131,6 +140,9 @@ public:
 
 	DynamicValue& getValueAtOffset(unsigned offset);
 
+	unsigned getElementSize() const { return elemSize; }
+	unsigned getNumElements() const { return array.size(); }
+
 	static bool classof(const DynamicValueConcept* c)
 	{
 		return c->getType() == DynamicValueType::ARRAY_VALUE;
@@ -155,8 +167,11 @@ private:
 public:
 	void addField(unsigned offset, DynamicValue&& val);
 	DynamicValue getFieldAtNum(unsigned num) const;
+	unsigned getOffsetAtNum(unsigned num) const;
 
 	DynamicValue& getValueAtOffset(unsigned offset);
+
+	unsigned getNumElements() const { return structMap.size(); }
 
 	static bool classof(const DynamicValueConcept* c)
 	{
@@ -182,22 +197,29 @@ public:
 	std::string toString() const;
 
 	bool isUndefValue() const { return impl.get() == nullptr; }
+	bool isIntValue() const;
+	bool isFloatValue() const;
+	bool isPointerValue() const;
 	bool isArrayValue() const;
 	bool isStructValue() const;
 	bool isAggregateValue() const;
 
 	IntValue& getAsIntValue();
+	const IntValue& getAsIntValue() const;
 	FloatValue& getAsFloatValue();
 	PointerValue& getAsPointerValue();
+	const PointerValue& getAsPointerValue() const;
 	ArrayValue& getAsArrayValue();
+	const ArrayValue& getAsArrayValue() const;
 	StructValue& getAsStructValue();
+	const StructValue& getAsStructValue() const;
 
 	DynamicValue& getValueAtOffset(unsigned offset);
 
 	static DynamicValue getUndefValue();
 	static DynamicValue getIntValue(const llvm::APInt& i);
 	static DynamicValue getFloatValue(double f);
-	static DynamicValue getPointerValue(Address a);
+	static DynamicValue getPointerValue(PointerAddressSpace s, Address a);
 	static DynamicValue getArrayValue(unsigned elemCnt, unsigned elemSize);
 	static DynamicValue getStructValue(unsigned sz);
 };

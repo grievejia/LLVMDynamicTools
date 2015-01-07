@@ -35,7 +35,7 @@ public:
 
 	void insertBinding(const llvm::Value* v, DynamicValue&& val)
 	{
-		assert(!vRegs.count(v) && "Duplicate entries in env!");
+		//assert(!vRegs.count(v) && "Duplicate entries in env!");
 		auto itr = vRegs.find(v);
 		if (itr == vRegs.end())
 			vRegs.insert(std::make_pair(v, std::move(val)));
@@ -50,6 +50,11 @@ public:
 	DynamicValue lookup(const llvm::Value* val) const
 	{
 		return vRegs.at(val);
+	}
+	bool hasBinding(const llvm::Value* val) const
+	{
+		auto itr = vRegs.find(val);
+		return itr != vRegs.end();
 	}
 
 	void insertVararg(DynamicValue&& val)
@@ -66,6 +71,8 @@ public:
 	{
 		return llvm::iterator_range<const_vararg_iterator>(vararg_begin(), vararg_end());
 	}
+
+	void dumpFrame() const;
 };
 
 class StackFrames

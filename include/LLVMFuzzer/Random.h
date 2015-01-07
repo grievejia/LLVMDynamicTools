@@ -30,6 +30,12 @@ public:
 		return distr(gen);
 	}
 
+	double getRandomDoubleWithNormalDist(double mean = 0.0, double stddev = 1.0)
+	{
+		std::normal_distribution<double> distr(mean, stddev);
+		return distr(gen);
+	}
+
 	// Return a random bool
 	bool getRandomBool()
 	{

@@ -13,19 +13,30 @@ Interpreter::Interpreter(llvm::Module* m): module(m), dataLayout(m)
 
 Interpreter::~Interpreter() {}
 
-Address Interpreter::allocateStackMem(StackFrame& frame, unsigned size)
+Address Interpreter::allocateStackMem(StackFrame& frame, unsigned size, Type* type)
 {
 	frame.increaseAllocationSize(size);
-	return stackMem.allocate(size);
+
+	if (type == nullptr)
+		return stackMem.allocate(size);
+	
+	if (auto arrayType = dyn_cast<ArrayType>(type))
+		return stackMem.allocateAndInitialize(size, evaluateConstant(UndefValue::get(arrayType)));
+	else if (auto structType = dyn_cast<StructType>(type))
+	{
+		// Construct the layout of the StructValue here
+		return stackMem.allocateAndInitialize(size, evaluateConstant(UndefValue::get(structType)));
+	}
+	else
+		return stackMem.allocate(size);
 }
 
-Address Interpreter::allocateGlobalMem(const llvm::GlobalValue* gv)
+Address Interpreter::allocateGlobalMem(Type* type)
 {
-	auto globalType = gv->getType();
-	if (globalType->isVectorTy())
+	if (type->isVectorTy())
 		llvm_unreachable("Vector type not supported");
 
-	auto globalSize = dataLayout.getTypeAllocSize(globalType);
+	auto globalSize = dataLayout.getTypeAllocSize(type);
 	return globalMem.allocate(globalSize);
 }
 
@@ -35,7 +46,8 @@ void Interpreter::evaluateGlobals()
 
 	for (auto const& globalVal: module->globals())
 	{
-		auto globalAddr = allocateGlobalMem(&globalVal);
+		auto elemType = cast<PointerType>(globalVal.getType())->getElementType();
+		auto globalAddr = allocateGlobalMem(elemType);
 		globalEnv.insert(std::make_pair(&globalVal, globalAddr));
 	}
 
@@ -49,7 +61,7 @@ void Interpreter::evaluateGlobals()
 	// Give each function a corresponding pointer
 	for (auto const& f: *module)
 	{
-		auto funAddr = allocateGlobalMem(&f);
+		auto funAddr = allocateGlobalMem(f.getType());
 		globalEnv.insert(std::make_pair(&f, funAddr));
 		funPtrMap.insert(std::make_pair(funAddr, &f));
 	}
@@ -58,15 +70,14 @@ void Interpreter::evaluateGlobals()
 DynamicValue Interpreter::callFunction(const llvm::Function* f, std::vector<DynamicValue>&& argValues)
 {
 	assert(f && "f is NULL in runFunction()!");
-
-	if (f->isDeclaration())
-		return callExternalFunction(f, std::move(argValues));
+	assert(f->isDeclaration() && "callFunction() does not handle external function!");
 
 	// Make a new stack frame... and fill it in
 	auto& calleeFrame = stack.createFrame(f);
 	assert(
 		(argValues.size() == f->arg_size() ||
-		(argValues.size() > f->arg_size() && f->getFunctionType()->isVarArg()))
+		(argValues.size() > f->arg_size() && f->getFunctionType()->isVarArg())) ||
+		(argValues.size() > f->arg_size() && f->getName() == "main")
 		&&
 		"Invalid number of values passed to function invocation!"
 	);
@@ -78,15 +89,21 @@ DynamicValue Interpreter::callFunction(const llvm::Function* f, std::vector<Dyna
 		calleeFrame.insertBinding(itr, std::move(argValues[i]));
 	}
 
-	// Handle varargs arguments...
-	for (auto itr = argValues.begin() + i, ite = argValues.end(); itr != ite; ++itr)
-		calleeFrame.insertVararg(std::move(*itr));
+	// If this is the main function and we don't have enough formal arg, just ignore the remaining actual arg
+	if (f->getName() != "main")
+	{
+		// Otherwise, handle varargs arguments...
+		for (auto itr = argValues.begin() + i, ite = argValues.end(); itr != ite; ++itr)
+			calleeFrame.insertVararg(std::move(*itr));
+	}
 
 	return runFunction(calleeFrame);
 }
 
 void Interpreter::popStack()
 {
+	//stack.getCurrentFrame().dumpFrame();
+	//stackMem.dumpMemory();
 	// Cleanup all the allocated memories in this frame
 	stackMem.deallocate(stack.getCurrentFrame().getAllocationSize());
 	stack.popFrame();
@@ -206,11 +223,57 @@ DynamicValue Interpreter::runFunction(StackFrame& frame)
 	}
 }
 
-int Interpreter::runMain(const Function* mainFn, const std::vector< std::string> mainArgs)
+std::vector<DynamicValue> Interpreter::createArgvArray(const std::vector<std::string>& mainArgs)
 {
-	auto args = std::vector<DynamicValue>();
+	auto retVec = std::vector<DynamicValue>();
 
-	// FIXME: Don't ignore main's arguments
+	// Push argc first
+	retVec.push_back(DynamicValue::getIntValue(APInt(32, mainArgs.size())));
+
+	// Compute the overall arg size
+	auto totalArgSize = 0u;
+	for (auto const& argStr: mainArgs)
+		totalArgSize += (argStr.size() + 1);
+
+	// Allocate the argv array in the global memory section
+	auto charType = Type::getInt8Ty(module->getContext());
+	auto ptrSize = dataLayout.getPointerSize();
+	auto argvPtrAddr = globalMem.allocateAndInitialize(totalArgSize, evaluateConstant(UndefValue::get(ArrayType::get(PointerType::getUnqual(charType), mainArgs.size()))));
+
+	// Push the argv pointer
+	retVec.push_back(DynamicValue::getPointerValue(PointerAddressSpace::GLOBAL_SPACE, argvPtrAddr));
+
+	// Fill in the argv array
+	for (auto const& argStr: mainArgs)
+	{
+		// Allocate the corresponding argv[] array
+		auto argSize = argStr.size() + 1;
+		auto argvAddr = globalMem.allocateAndInitialize(argSize,
+			evaluateConstant(
+				UndefValue::get(ArrayType::get(charType, argSize))
+			)
+		);
+
+		// Update the argv pointer
+		globalMem.write(argvPtrAddr, DynamicValue::getPointerValue(PointerAddressSpace::GLOBAL_SPACE, argvAddr));
+		argvPtrAddr += ptrSize;
+
+		for (auto const argChar: argStr)
+		{
+			globalMem.write(argvAddr, DynamicValue::getIntValue(APInt(8, argChar)));
+			++argvAddr;
+		}
+		// Don't forget the NULL terminator
+		globalMem.write(argvAddr, DynamicValue::getIntValue(APInt(8, 0)));
+	}
+
+	return retVec;
+}
+
+int Interpreter::runMain(const Function* mainFn, const std::vector< std::string>& mainArgs)
+{
+	auto args = createArgvArray(mainArgs);
+
 	auto retVal = callFunction(mainFn, std::move(args));
 	if (retVal.isUndefValue())
 		return 0;
