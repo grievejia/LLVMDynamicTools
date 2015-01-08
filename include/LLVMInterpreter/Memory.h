@@ -143,7 +143,7 @@ public:
 		{
 			if (itr->first >= endAddr)
 				break;
-			retRegion.vec.emplace_back(itr->first - addr, itr->second);
+			retRegion.vec.emplace_back(addr - itr->first, itr->second);
 		}
 
 		return retRegion;

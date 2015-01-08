@@ -70,7 +70,7 @@ void Interpreter::evaluateGlobals()
 DynamicValue Interpreter::callFunction(const llvm::Function* f, std::vector<DynamicValue>&& argValues)
 {
 	assert(f && "f is NULL in runFunction()!");
-	assert(f->isDeclaration() && "callFunction() does not handle external function!");
+	assert(!f->isDeclaration() && "callFunction() does not handle external function!");
 
 	// Make a new stack frame... and fill it in
 	auto& calleeFrame = stack.createFrame(f);

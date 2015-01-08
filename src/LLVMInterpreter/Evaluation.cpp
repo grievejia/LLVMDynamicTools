@@ -505,36 +505,55 @@ DynamicValue Interpreter::evaluateConstantExpr(const llvm::ConstantExpr* cexpr)
 		}
 		case Instruction::ICmp:
 		{
-			return evaluateConstantIntBinOp(
-				[cexpr] (const APInt& i0, const APInt& i1)
+			auto cmp = [cexpr] (const APInt& i0, const APInt& i1)
+			{
+				switch (cexpr->getPredicate())
 				{
-					switch (cexpr->getPredicate())
-					{
-						case CmpInst::ICMP_EQ:
-							return APInt(1, i0 == i1);
-						case CmpInst::ICMP_NE:
-							return APInt(1, i0 != i1);
-						case CmpInst::ICMP_UGT:
-							return APInt(1, i0.ugt(i1));
-						case CmpInst::ICMP_UGE:
-							return APInt(1, i0.uge(i1));
-						case CmpInst::ICMP_ULT:
-							return APInt(1, i0.ult(i1));
-						case CmpInst::ICMP_ULE:
-							return APInt(1, i0.ule(i1));
-						case CmpInst::ICMP_SGT:
-							return APInt(1, i0.sgt(i1));
-						case CmpInst::ICMP_SGE:
-							return APInt(1, i0.sge(i1));
-						case CmpInst::ICMP_SLT:
-							return APInt(1, i0.slt(i1));
-						case CmpInst::ICMP_SLE:
-							return APInt(1, i0.sle(i1));
-						default:
-							llvm_unreachable("Illegal icmp predicate");
-					}
+					case CmpInst::ICMP_EQ:
+						return APInt(1, i0 == i1);
+					case CmpInst::ICMP_NE:
+						return APInt(1, i0 != i1);
+					case CmpInst::ICMP_UGT:
+						return APInt(1, i0.ugt(i1));
+					case CmpInst::ICMP_UGE:
+						return APInt(1, i0.uge(i1));
+					case CmpInst::ICMP_ULT:
+						return APInt(1, i0.ult(i1));
+					case CmpInst::ICMP_ULE:
+						return APInt(1, i0.ule(i1));
+					case CmpInst::ICMP_SGT:
+						return APInt(1, i0.sgt(i1));
+					case CmpInst::ICMP_SGE:
+						return APInt(1, i0.sge(i1));
+					case CmpInst::ICMP_SLT:
+						return APInt(1, i0.slt(i1));
+					case CmpInst::ICMP_SLE:
+						return APInt(1, i0.sle(i1));
+					default:
+						llvm_unreachable("Illegal icmp predicate");
 				}
-			);
+			};
+
+			// ICmp can compare both integers and pointers, so we cannot just use evaluateIntBinOp
+			auto val0 = evaluateConstant(cexpr->getOperand(0));
+			auto val1 = evaluateConstant(cexpr->getOperand(1));
+			if (val0.isIntValue() && val1.isIntValue())
+			{
+				auto& intVal0 = val0.getAsIntValue();
+				auto res = cmp(intVal0.getInt(), val1.getAsIntValue().getInt());
+				intVal0.setInt(res);
+				return std::move(val0);
+			}
+			else if (val0.isPointerValue() && val1.isPointerValue())
+			{
+				auto ptrSize = dataLayout.getPointerSizeInBits();
+				auto addr0 = val0.getAsPointerValue().getAddress();
+				auto addr1 = val1.getAsPointerValue().getAddress();
+				auto res = cmp(APInt(ptrSize, addr0), APInt(ptrSize, addr1));
+				return DynamicValue::getIntValue(res);
+			}
+			else
+				llvm_unreachable("Illegal icmp compare types");
 		}
 		case Instruction::FAdd:
 		{
@@ -717,7 +736,7 @@ DynamicValue Interpreter::evaluateOperand(const StackFrame& frame, const llvm::V
 
 void Interpreter::evaluateInstruction(StackFrame& frame, const llvm::Instruction* inst)
 {
-	errs() << "Eval " << *inst << "\n";
+	//errs() << "Eval " << *inst << "\n";
 	auto evaluateIntBinOp = [this, &frame, inst] (auto binOp)
 	{
 		auto val0 = evaluateOperand(frame, inst->getOperand(0));
@@ -950,36 +969,56 @@ void Interpreter::evaluateInstruction(StackFrame& frame, const llvm::Instruction
 		}
 		case Instruction::ICmp:
 		{
-			evaluateIntBinOp(
-				[inst] (const APInt& i0, const APInt& i1)
+			auto cmp = [inst] (const APInt& i0, const APInt& i1)
+			{
+				switch (cast<CmpInst>(inst)->getPredicate())
 				{
-					switch (cast<CmpInst>(inst)->getPredicate())
-					{
-						case CmpInst::ICMP_EQ:
-							return APInt(1, i0 == i1);
-						case CmpInst::ICMP_NE:
-							return APInt(1, i0 != i1);
-						case CmpInst::ICMP_UGT:
-							return APInt(1, i0.ugt(i1));
-						case CmpInst::ICMP_UGE:
-							return APInt(1, i0.uge(i1));
-						case CmpInst::ICMP_ULT:
-							return APInt(1, i0.ult(i1));
-						case CmpInst::ICMP_ULE:
-							return APInt(1, i0.ule(i1));
-						case CmpInst::ICMP_SGT:
-							return APInt(1, i0.sgt(i1));
-						case CmpInst::ICMP_SGE:
-							return APInt(1, i0.sge(i1));
-						case CmpInst::ICMP_SLT:
-							return APInt(1, i0.slt(i1));
-						case CmpInst::ICMP_SLE:
-							return APInt(1, i0.sle(i1));
-						default:
-							llvm_unreachable("Illegal icmp predicate");
-					}
+					case CmpInst::ICMP_EQ:
+						return APInt(1, i0 == i1);
+					case CmpInst::ICMP_NE:
+						return APInt(1, i0 != i1);
+					case CmpInst::ICMP_UGT:
+						return APInt(1, i0.ugt(i1));
+					case CmpInst::ICMP_UGE:
+						return APInt(1, i0.uge(i1));
+					case CmpInst::ICMP_ULT:
+						return APInt(1, i0.ult(i1));
+					case CmpInst::ICMP_ULE:
+						return APInt(1, i0.ule(i1));
+					case CmpInst::ICMP_SGT:
+						return APInt(1, i0.sgt(i1));
+					case CmpInst::ICMP_SGE:
+						return APInt(1, i0.sge(i1));
+					case CmpInst::ICMP_SLT:
+						return APInt(1, i0.slt(i1));
+					case CmpInst::ICMP_SLE:
+						return APInt(1, i0.sle(i1));
+					default:
+						llvm_unreachable("Illegal icmp predicate");
 				}
-			);
+			};
+
+			// ICmp can compare both integers and pointers, so we cannot just use evaluateIntBinOp
+			auto val0 = evaluateOperand(frame, inst->getOperand(0));
+			auto val1 = evaluateOperand(frame, inst->getOperand(1));
+			if (val0.isIntValue() && val1.isIntValue())
+			{
+				auto& intVal0 = val0.getAsIntValue();
+				auto res = cmp(intVal0.getInt(), val1.getAsIntValue().getInt());
+				intVal0.setInt(res);
+				frame.insertBinding(inst, std::move(val0));
+			}
+			else if (val0.isPointerValue() && val1.isPointerValue())
+			{
+				auto ptrSize = dataLayout.getPointerSizeInBits();
+				auto addr0 = val0.getAsPointerValue().getAddress();
+				auto addr1 = val1.getAsPointerValue().getAddress();
+				auto res = cmp(APInt(ptrSize, addr0), APInt(ptrSize, addr1));
+				frame.insertBinding(inst, DynamicValue::getIntValue(res));
+			}
+			else
+				llvm_unreachable("Illegal icmp compare types");
+
 			break;
 		}
 		case Instruction::FCmp:
@@ -1064,7 +1103,7 @@ void Interpreter::evaluateInstruction(StackFrame& frame, const llvm::Instruction
 			evaluateIntUnOp(
 				[extWidth] (const APInt& i0)
 				{
-					return i0.sext(extWidth);
+					return i0. sext(extWidth);
 				}
 			);
 			break;
@@ -1216,6 +1255,7 @@ void Interpreter::evaluateInstruction(StackFrame& frame, const llvm::Instruction
 			auto& loadPtr = loadSrc.getAsPointerValue();
 
 			auto resVal = readFromPointer(loadPtr);
+
 			frame.insertBinding(inst, std::move(resVal));
 
 			break;
@@ -1227,6 +1267,13 @@ void Interpreter::evaluateInstruction(StackFrame& frame, const llvm::Instruction
 			auto storeSrc = evaluateOperand(frame, storeInst->getPointerOperand());
 			auto storeVal = evaluateOperand(frame, storeInst->getValueOperand());
 			auto& storePtr = storeSrc.getAsPointerValue();
+
+			if (frame.getFunction()->getName() == "func_6")
+			{
+				errs() << "inst = " << *inst << '\n';
+				errs() << "storePtr = " << storeSrc.toString() << "\n";
+				errs() << "storeVal = " << storeVal.toString() << "\n";
+			}
 
 			writeToPointer(storePtr, std::move(storeVal));
 

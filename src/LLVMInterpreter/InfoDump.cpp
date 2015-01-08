@@ -84,3 +84,13 @@ void StackFrame::dumpFrame() const
 
 	errs() << "---        End       ---\n";
 }
+
+void StackFrames::dumpContext() const
+{
+	errs() << "Context = [ ";
+	for (auto const& frame: frames)
+	{
+		errs() << frame->getFunction()->getName() << " ";
+	}
+	errs() << "]\n";
+}

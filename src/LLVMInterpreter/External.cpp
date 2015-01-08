@@ -52,42 +52,44 @@ static PointerType* getMallocType(const Instruction* inst)
 		return nullptr;
 }
 
-static void fillMemoryImpl(MemorySection& mem, Address addr, unsigned fillInt, const DynamicValue& val)
+static void fillMemoryImpl(MemorySection& mem, Address addr, unsigned fillInt, Type* type, DataLayout& dataLayout)
 {
-	if (val.isIntValue())
+	if (auto arrayType = dyn_cast<ArrayType>(type))
 	{
-		auto fillVal = val;
-		mem.write(addr, std::move(fillVal));
+		auto elemType = arrayType->getElementType();
+		auto elemSize = dataLayout.getTypeAllocSize(elemType);
+		for (unsigned i = 0, e = arrayType->getNumElements(); i < e; ++i)
+			fillMemoryImpl(mem, addr + i * elemSize, fillInt, elemType, dataLayout);
 	}
-	else if (val.isFloatValue())
+	else if (auto stType = dyn_cast<StructType>(type))
+	{
+		auto stLayout = dataLayout.getStructLayout(stType);
+
+		for (unsigned i = 0, e = stType->getNumElements(); i < e; ++i)
+		{
+			fillMemoryImpl(mem, addr + stLayout->getElementOffset(i), fillInt, stType->getElementType(i), dataLayout);
+		}
+	}
+	else if (auto intType = dyn_cast<IntegerType>(type))
+	{
+		mem.write(addr, DynamicValue::getIntValue(APInt(intType->getBitWidth(), fillInt)));
+	}
+	else if (type->isFloatTy() || type->isDoubleTy())
 	{
 		if (fillInt == 0)
 			mem.write(addr, DynamicValue::getFloatValue(0));
 		else
 			llvm_unreachable("memset() floats to an int value?");
 	}
-	else if (val.isPointerValue())
+	else if (type->isPointerTy())
 	{
 		if (fillInt == 0)
 			mem.write(addr, DynamicValue::getPointerValue(PointerAddressSpace::GLOBAL_SPACE, 0));
 		else
 			llvm_unreachable("memset() fabricates pointers from int");
 	}
-	else if (val.isArrayValue())
-	{
-		auto& arrayVal = val.getAsArrayValue();
-		for (auto i = 0u, e = arrayVal.getNumElements(); i < e; ++i)
-			fillMemoryImpl(mem, addr + i * arrayVal.getElementSize(), fillInt, arrayVal.getElementAtIndex(i));
-	}
-	else if (val.isStructValue())
-	{
-		auto& stVal = val.getAsStructValue();
-		for (auto i = 0u, e = stVal.getNumElements(); i < e; ++i)
-		{
-			fillMemoryImpl(mem, addr, fillInt, stVal.getFieldAtNum(i));
-			addr += stVal.getOffsetAtNum(i);
-		}
-	}
+	else
+		llvm_unreachable("Unhandled type in fillMemoryImpl()");
 };
 
 std::string Interpreter::ptrToString(DynamicValue& v)
@@ -149,18 +151,18 @@ DynamicValue Interpreter::callExternalFunction(ImmutableCallSite cs, const llvm:
 		}
 	};
 
-	auto fillMemory = [this] (const PointerValue& ptr, unsigned fillInt, const DynamicValue& val)
+	auto fillMemory = [this] (const PointerValue& ptr, unsigned fillInt, Type* fillType)
 	{
 		switch (ptr.getAddressSpace())
 		{
 			case PointerAddressSpace::GLOBAL_SPACE:
-				fillMemoryImpl(globalMem, ptr.getAddress(), fillInt, val);
+				fillMemoryImpl(globalMem, ptr.getAddress(), fillInt, fillType, dataLayout);
 				break;
 			case PointerAddressSpace::STACK_SPACE:
-				fillMemoryImpl(stackMem, ptr.getAddress(), fillInt, val);
+				fillMemoryImpl(stackMem, ptr.getAddress(), fillInt, fillType, dataLayout);
 				break;
 			case PointerAddressSpace::HEAP_SPACE:
-				fillMemoryImpl(heapMem, ptr.getAddress(), fillInt, val);
+				fillMemoryImpl(heapMem, ptr.getAddress(), fillInt, fillType, dataLayout);
 				break;
 		}
 	};
@@ -209,7 +211,15 @@ DynamicValue Interpreter::callExternalFunction(ImmutableCallSite cs, const llvm:
 			auto& srcPtr = argValues.at(1).getAsPointerValue();
 			auto size = argValues.at(2).getAsIntValue().getInt().getZExtValue();
 
-			writeMemoryRegion(destPtr, readMemoryRegion(srcPtr, size));
+			errs() << "inst = " << *cs.getInstruction() << "\n";
+			/*errs() << "destPtr = " << destPtr.getAddress();
+			errs() << "srcPtr = " << srcPtr.getAddress();
+			stackMem.dumpMemory();*/
+
+			auto region = readMemoryRegion(srcPtr, size);
+			for (auto const& mapping: region)
+				errs() << mapping.first << ", " << mapping.second.toString() << "\n";
+			writeMemoryRegion(destPtr, std::move(region));
 			
 			return DynamicValue::getUndefValue();
 		}
@@ -224,8 +234,9 @@ DynamicValue Interpreter::callExternalFunction(ImmutableCallSite cs, const llvm:
 			auto memRegion = readMemoryRegion(destPtr, size);
 			if (memRegion.getNumEntry() > 1)
 				llvm_unreachable("Memset() gets an awesome memory region");
-			auto& sketchVal = memRegion.begin()->second;
-			fillMemory(destPtr, fillInt, sketchVal);
+
+			auto fillType = cast<PointerType>(cs.getArgument(0)->stripPointerCasts()->getType())->getElementType();
+			fillMemory(destPtr, fillInt, fillType);
 
 			return DynamicValue::getUndefValue();
 		}

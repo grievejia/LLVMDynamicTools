@@ -98,6 +98,8 @@ public:
 		assert(!frames.empty());
 		frames.pop_back();
 	}
+
+	void dumpContext() const;
 };
 
 }
