@@ -4,7 +4,6 @@
 #include "llvm/ADT/APInt.h"
 
 #include <cstdint>
-#include <memory>
 #include <map>
 #include <string>
 
@@ -20,73 +19,37 @@ enum class DynamicValueType
 	POINTER_VALUE,
 	ARRAY_VALUE,
 	STRUCT_VALUE,
+	UNDEF_VALUE
 };
-
-// Abstract concept
-class DynamicValueConcept
-{
-private:
-	DynamicValueType type;
-protected:
-	virtual DynamicValueConcept* clone() const = 0;
-	virtual std::string toString() const = 0;
-public:
-	DynamicValueConcept(DynamicValueType t): type(t) {}
-
-	DynamicValueType getType() const
-	{
-		return type;
-	}
-
-	virtual ~DynamicValueConcept() = default;
-
-	friend class DynamicValue;
-};
-
-class DynamicValue;
-
-// Models of the general concepts
 
 // Integer value
-class IntValue: public DynamicValueConcept
+class IntValue
 {
 private:
 	llvm::APInt intVal;
-	IntValue* clone() const override;
 
-	explicit IntValue(const llvm::APInt& i): DynamicValueConcept(DynamicValueType::INT_VALUE), intVal(i) {}
+	explicit IntValue(const llvm::APInt& i): intVal(i) {}
 
-	std::string toString() const override;
+	std::string toString() const;
 public:
 	const llvm::APInt& getInt() const { return intVal; }
-	void setInt(const llvm::APInt& other) { intVal = other; }
-
-	static bool classof(const DynamicValueConcept* c)
-	{
-		return c->getType() == DynamicValueType::INT_VALUE;
-	}
 
 	friend class DynamicValue;
 };
 
 // Floating point value
-class FloatValue: public DynamicValueConcept
+class FloatValue
 {
 private:
 	double fpVal;
-	FloatValue* clone() const override;
+	bool doubleFlag;
 
-	explicit FloatValue(double f): DynamicValueConcept(DynamicValueType::FLOAT_VALUE), fpVal(f) {}
+	explicit FloatValue(double f, bool i): fpVal(f), doubleFlag(i) {}
 
-	std::string toString() const override;
+	std::string toString() const;
 public:
 	double getFloat() const { return fpVal; }
-	void setFloat(double other) { fpVal = other; }
-
-	static bool classof(const DynamicValueConcept* c)
-	{
-		return c->getType() == DynamicValueType::FLOAT_VALUE;
-	}
+	bool isDouble() const { return doubleFlag; }
 
 	friend class DynamicValue;
 };
@@ -99,94 +62,104 @@ enum class PointerAddressSpace: std::uint8_t
 	HEAP_SPACE
 };
 
-class PointerValue: public DynamicValueConcept
+class PointerValue
 {
 private:
+	static size_t PointerSize;
+
 	PointerAddressSpace addrSpace;
 	Address ptr;
-	PointerValue* clone() const override;
 
-	PointerValue(PointerAddressSpace s, Address a): DynamicValueConcept(DynamicValueType::POINTER_VALUE), addrSpace(s), ptr(a) {}
+	PointerValue(PointerAddressSpace s, Address a): addrSpace(s), ptr(a) {}
 
-	std::string toString() const override;
+	std::string toString() const;
 public:
 	Address getAddress() const { return ptr; }
 	PointerAddressSpace getAddressSpace() const { return addrSpace; }
-	void setAddress(Address other) { ptr = other; }
 
-	static bool classof(const DynamicValueConcept* c)
-	{
-		return c->getType() == DynamicValueType::POINTER_VALUE;
-	}
+	static size_t getPointerSize() { return PointerSize; }
+	static void setPointerSize(size_t sz) { PointerSize = sz; }
 
 	friend class DynamicValue;
 };
 
-class ArrayValue: public DynamicValueConcept
+class DynamicValue;
+
+class ArrayValue
 {
 private:
 	using ArrayType = std::vector<DynamicValue>;
 	ArrayType array;
 	unsigned elemSize;
 
-	ArrayValue* clone() const override;
-	ArrayValue(const ArrayType& a, unsigned e): DynamicValueConcept(DynamicValueType::ARRAY_VALUE), array(a), elemSize(e) {}
+	ArrayValue(const ArrayType& a, unsigned e): array(a), elemSize(e) {}
 	ArrayValue(unsigned elemCnt, unsigned elemSize);
 
-	std::string toString() const override;
+	std::string toString() const;
 public:
 	void setElementAtIndex(unsigned idx, DynamicValue&& val);
 	DynamicValue getElementAtIndex(unsigned idx) const;
 
-	DynamicValue& getValueAtOffset(unsigned offset);
-
 	unsigned getElementSize() const { return elemSize; }
 	unsigned getNumElements() const { return array.size(); }
-
-	static bool classof(const DynamicValueConcept* c)
-	{
-		return c->getType() == DynamicValueType::ARRAY_VALUE;
-	}
 
 	friend class DynamicValue;
 };
 
-class StructValue: public DynamicValueConcept
+class StructValue
 {
 private:
 	using StructMapType = std::map<unsigned, DynamicValue>;
 	StructMapType structMap;
 	unsigned structSize;
 
-	StructValue* clone() const override;
+	StructValue(const StructMapType& s, unsigned sz): structMap(s), structSize(sz) {}
+	StructValue(unsigned sz): structSize(sz) {}
 
-	StructValue(const StructMapType& s, unsigned sz): DynamicValueConcept(DynamicValueType::STRUCT_VALUE), structMap(s), structSize(sz) {}
-	StructValue(unsigned sz): DynamicValueConcept(DynamicValueType::STRUCT_VALUE), structSize(sz) {}
-
-	std::string toString() const override;
+	std::string toString() const;
 public:
 	void addField(unsigned offset, DynamicValue&& val);
 	DynamicValue getFieldAtNum(unsigned num) const;
 	unsigned getOffsetAtNum(unsigned num) const;
 
-	DynamicValue& getValueAtOffset(unsigned offset);
-
 	unsigned getNumElements() const { return structMap.size(); }
-
-	static bool classof(const DynamicValueConcept* c)
-	{
-		return c->getType() == DynamicValueType::STRUCT_VALUE;
-	}
 
 	friend class DynamicValue;
 };
 
+// We have two choices to make DynamicValue a polymorphic value type: using union, or using concept-based polymorphism. We choose the former here because of its efficiency
 class DynamicValue
 {
 private:
-	std::unique_ptr<DynamicValueConcept> impl;
+	DynamicValueType type;
+	
+	// Since C++11, union may contain non-POD data members
+	// However, care must be taken when those member contains nontrivial special member functions. We define the constructor/destructor of Data to do nothing, but instead do all the work in the special member function of DynamicValue
+	union ValueData
+	{
+		IntValue intVal;
+		FloatValue floatVal;
+		PointerValue ptrVal;
+		ArrayValue arrayVal;
+		StructValue structVal;
+		uint8_t placeHolder;
 
-	DynamicValue(DynamicValueConcept* c);
+		ValueData(): placeHolder(0) {}
+		~ValueData() {}
+	} data;
+
+	// Destruct any existing data values. Must be called if the data member is a pointer to somewhere else
+	void clear();
+
+	DynamicValue();	// Undef constructor
+	DynamicValue(IntValue&& intVal);	// Int constructor
+	DynamicValue(FloatValue&& floatVal);	// Float constructor
+	DynamicValue(PointerValue&& ptrVal);	// Pointer constructor
+	DynamicValue(ArrayValue&& arrayVal);	// Array constructor
+	DynamicValue(StructValue&& structVal);	// Struct constructor
+
+	inline void copyFrom(const DynamicValue& other);
+	inline void moveFrom(DynamicValue&& other);
 public:
 	~DynamicValue();
 	DynamicValue(const DynamicValue&);
@@ -195,30 +168,48 @@ public:
 	DynamicValue& operator=(DynamicValue&&);
 
 	std::string toString() const;
+	DynamicValueType getType() const { return type; }
 
-	bool isUndefValue() const { return impl.get() == nullptr; }
-	bool isIntValue() const;
-	bool isFloatValue() const;
-	bool isPointerValue() const;
-	bool isArrayValue() const;
-	bool isStructValue() const;
-	bool isAggregateValue() const;
+	bool isUndefValue() const
+	{
+		return type == DynamicValueType::UNDEF_VALUE;
+	}
+	bool isIntValue() const
+	{
+		return type == DynamicValueType::INT_VALUE;
+	}
+	bool isFloatValue() const
+	{
+		return type == DynamicValueType::FLOAT_VALUE;
+	}
+	bool isPointerValue() const
+	{
+		return type == DynamicValueType::POINTER_VALUE;
+	}
+	bool isArrayValue() const
+	{
+		return type == DynamicValueType::ARRAY_VALUE;
+	}
+	bool isStructValue() const
+	{
+		return type == DynamicValueType::STRUCT_VALUE;
+	}
+	bool isAggregateValue() const
+	{
+		return isArrayValue() || isStructValue();
+	}
 
-	IntValue& getAsIntValue();
 	const IntValue& getAsIntValue() const;
-	FloatValue& getAsFloatValue();
-	PointerValue& getAsPointerValue();
+	const FloatValue& getAsFloatValue() const;
 	const PointerValue& getAsPointerValue() const;
 	ArrayValue& getAsArrayValue();
 	const ArrayValue& getAsArrayValue() const;
 	StructValue& getAsStructValue();
 	const StructValue& getAsStructValue() const;
 
-	DynamicValue& getValueAtOffset(unsigned offset);
-
 	static DynamicValue getUndefValue();
 	static DynamicValue getIntValue(const llvm::APInt& i);
-	static DynamicValue getFloatValue(double f);
+	static DynamicValue getFloatValue(double f, bool i);
 	static DynamicValue getPointerValue(PointerAddressSpace s, Address a);
 	static DynamicValue getArrayValue(unsigned elemCnt, unsigned elemSize);
 	static DynamicValue getStructValue(unsigned sz);

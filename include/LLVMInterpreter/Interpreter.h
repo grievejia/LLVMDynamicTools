@@ -36,10 +36,12 @@ private:
 	// The heap memory
 	MemorySection heapMem;
 
-	Address allocateStackMem(StackFrame& frame, unsigned size, llvm::Type* type = nullptr);
+	Address allocateStackMem(StackFrame& frame, unsigned size);
 	Address allocateGlobalMem(llvm::Type* type);
-	const DynamicValue& readFromPointer(const PointerValue& ptr);
-	void writeToPointer(const PointerValue& ptr, DynamicValue&& val);
+
+	DynamicValue readFromPointer(const PointerValue& ptr, llvm::Type* type);
+	DynamicValue loadValue(MemorySection& mem, Address addr, llvm::Type* type);
+	void writeToPointer(const PointerValue& ptr, const DynamicValue& val);
 	std::vector<DynamicValue> createArgvArray(const std::vector<std::string>& mainArgs);
 
 	DynamicValue evaluateConstant(const llvm::Constant*);
@@ -53,8 +55,6 @@ private:
 	DynamicValue callExternalFunction(llvm::ImmutableCallSite cs, const llvm::Function* f, std::vector<DynamicValue>&& argValues);
 	// Pop the last stack frame off of the stack before returning to the caller
 	void popStack();
-
-	std::string ptrToString(DynamicValue& ptrVal);
 
 	DynamicValue evaluateOperand(const StackFrame& frame, const llvm::Value* v);
 	void evaluateInstruction(StackFrame& frame, const llvm::Instruction* inst);

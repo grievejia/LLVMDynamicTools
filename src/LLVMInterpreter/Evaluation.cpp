@@ -34,29 +34,70 @@ static Value* findBasePointer(const Value* val)
 	llvm_unreachable("Unhandled case for findBasePointer()");
 }
 
-const DynamicValue& Interpreter::readFromPointer(const PointerValue& ptr)
+DynamicValue Interpreter::loadValue(MemorySection& mem, Address addr, Type* loadType)
+{
+	if (auto intType = dyn_cast<IntegerType>(loadType))
+		return mem.readAsInt(addr, intType->getBitWidth());
+	else if (loadType->isPointerTy())
+		return mem.readAsPointer(addr);
+	else if (loadType->isDoubleTy() || loadType->isFloatTy())
+		return mem.readAsFloat(addr, loadType->isDoubleTy());
+	else if (auto stType = dyn_cast<StructType>(loadType))
+	{
+		auto stLayout = dataLayout.getStructLayout(stType);
+
+		auto retVal = DynamicValue::getStructValue(dataLayout.getTypeAllocSize(stType));
+		auto& structVal = retVal.getAsStructValue();
+		for (auto i = 0u, e = stType->getNumElements(); i < e; ++i)
+		{
+			auto elemType = stType->getElementType(i);
+			auto offset = stLayout->getElementOffset(i);
+			structVal.addField(offset, loadValue(mem, addr + offset, elemType));
+		}
+		return retVal;
+	}
+	else if (auto arrayType = dyn_cast<ArrayType>(loadType))
+	{
+		auto elemType = arrayType->getElementType();
+		auto elemSize = dataLayout.getTypeAllocSize(elemType);
+		auto arraySize = arrayType->getNumElements();
+
+		auto retVal = DynamicValue::getArrayValue(arraySize, elemSize);
+		auto& arrayVal = retVal.getAsArrayValue();
+		for (unsigned i = 0; i < arraySize; ++i)
+		{
+			if (elemType->isAggregateType())
+				arrayVal.setElementAtIndex(i, loadValue(mem, addr + i * elemSize, elemType));
+		}
+		return retVal;
+	}
+	else
+		llvm_unreachable("Load type not supported");
+};
+
+DynamicValue Interpreter::readFromPointer(const PointerValue& ptr, Type* loadType)
 {
 	switch (ptr.getAddressSpace())
 	{
 		case PointerAddressSpace::GLOBAL_SPACE:
-			return globalMem.read(ptr.getAddress());
+			return loadValue(globalMem, ptr.getAddress(), loadType);
 		case PointerAddressSpace::STACK_SPACE:
-			return stackMem.read(ptr.getAddress());
+			return loadValue(stackMem, ptr.getAddress(), loadType);
 		case PointerAddressSpace::HEAP_SPACE:
-			return heapMem.read(ptr.getAddress());
+			return loadValue(heapMem, ptr.getAddress(), loadType);
 	}
 }
 
-void Interpreter::writeToPointer(const PointerValue& ptr, DynamicValue&& val)
+void Interpreter::writeToPointer(const PointerValue& ptr, const DynamicValue& val)
 {
 	switch (ptr.getAddressSpace())
 	{
 		case PointerAddressSpace::GLOBAL_SPACE:
-			return globalMem.write(ptr.getAddress(), std::move(val));
+			return globalMem.write(ptr.getAddress(), val);
 		case PointerAddressSpace::STACK_SPACE:
-			return stackMem.write(ptr.getAddress(), std::move(val));
+			return stackMem.write(ptr.getAddress(), val);
 		case PointerAddressSpace::HEAP_SPACE:
-			return heapMem.write(ptr.getAddress(), std::move(val));
+			return heapMem.write(ptr.getAddress(), val);
 	}
 }
 
@@ -170,7 +211,7 @@ DynamicValue Interpreter::evaluateConstant(const llvm::Constant* cv)
 		case Value::ConstantFPVal:
 		{
 			auto cFloat = cast<ConstantFP>(cv);
-			return DynamicValue::getFloatValue(cFloat->getValueAPF().convertToDouble());
+			return DynamicValue::getFloatValue(cFloat->getValueAPF().convertToDouble(), cFloat->getType()->isDoubleTy());
 		}
 		case Value::ConstantArrayVal:
 		{
@@ -224,8 +265,7 @@ DynamicValue Interpreter::evaluateConstantExpr(const llvm::ConstantExpr* cexpr)
 		auto srcVal = evaluateConstant(cexpr->getOperand(0));
 		auto& srcIntVal = srcVal.getAsIntValue();
 		// Heap memory reuse
-		srcIntVal.setInt(unOp(srcIntVal.getInt()));
-		return std::move(srcVal);
+		return DynamicValue::getIntValue(unOp(srcIntVal.getInt()));
 	};
 
 	auto evaluateConstantIntBinOp = [this, cexpr] (auto binOp) -> DynamicValue
@@ -236,8 +276,7 @@ DynamicValue Interpreter::evaluateConstantExpr(const llvm::ConstantExpr* cexpr)
 		auto& srcIntVal0 = srcVal0.getAsIntValue();
 		auto& srcIntVal1 = srcVal1.getAsIntValue();
 		// Heap memory reuse
-		srcIntVal0.setInt(binOp(srcIntVal0.getInt(), srcIntVal1.getInt()));
-		return std::move(srcVal0);
+		return DynamicValue::getIntValue(binOp(srcIntVal0.getInt(), srcIntVal1.getInt()));
 	};
 
 	auto evaluateConstantFloatBinOp = [this, cexpr] (auto binOp) -> DynamicValue
@@ -247,9 +286,8 @@ DynamicValue Interpreter::evaluateConstantExpr(const llvm::ConstantExpr* cexpr)
 
 		auto& srcFloatVal0 = srcVal0.getAsFloatValue();
 		auto& srcFloatVal1 = srcVal1.getAsFloatValue();
-		// Heap memory reuse
-		srcFloatVal0.setFloat(binOp(srcFloatVal0.getFloat(), srcFloatVal1.getFloat()));
-		return std::move(srcVal0);
+		assert(srcFloatVal0.isDouble() == srcFloatVal1.isDouble());
+		return DynamicValue::getFloatValue(binOp(srcFloatVal0.getFloat(), srcFloatVal1.getFloat()), srcFloatVal0.isDouble());
 	};
 
 	switch (cexpr->getOpcode())
@@ -293,9 +331,8 @@ DynamicValue Interpreter::evaluateConstantExpr(const llvm::ConstantExpr* cexpr)
 
 			auto srcVal = evaluateConstant(cexpr->getOperand(0));
 			auto& srcFloatVal = srcVal.getAsFloatValue();
-			// Heap memory reuse
-			srcFloatVal.setFloat(static_cast<float>(srcFloatVal.getFloat()));
-			return std::move(srcVal);
+			assert(srcFloatVal.isDouble());
+			return DynamicValue::getFloatValue(static_cast<float>(srcFloatVal.getFloat()), false);
 		}
 		case Instruction::FPExt:
 		{
@@ -305,14 +342,16 @@ DynamicValue Interpreter::evaluateConstantExpr(const llvm::ConstantExpr* cexpr)
 				llvm_unreachable("Invalid FPExt instruction");
 
 			auto srcVal = evaluateConstant(cexpr->getOperand(0));
+			auto& srcFloatVal = srcVal.getAsFloatValue();
+			assert(!srcFloatVal.isDouble());
 			// FPExt is a noop in this implementation
-			return std::move(srcVal);
+			return DynamicValue::getFloatValue(srcFloatVal.getFloat(), true);
 		}
 		case Instruction::UIToFP:
 		case Instruction::SIToFP:
 		{
 			auto srcVal = evaluateConstant(cexpr->getOperand(0));
-			return DynamicValue::getFloatValue(APIntOps::RoundAPIntToDouble(srcVal.getAsIntValue().getInt()));
+			return DynamicValue::getFloatValue(APIntOps::RoundAPIntToDouble(srcVal.getAsIntValue().getInt()), cexpr->getType()->isDoubleTy());
 		}
 		case Instruction::FPToUI:
 		case Instruction::FPToSI:
@@ -364,11 +403,11 @@ DynamicValue Interpreter::evaluateConstantExpr(const llvm::ConstantExpr* cexpr)
 			{
 				if (srcType->isIntegerTy())
 				{
-					return DynamicValue::getFloatValue(srcVal.getAsIntValue().getInt().bitsToDouble());
+					return DynamicValue::getFloatValue(srcVal.getAsIntValue().getInt().bitsToDouble(), dstType->isDoubleTy());
 				}
 				else
 				{
-					return std::move(srcVal);
+					return DynamicValue::getFloatValue(srcVal.getAsFloatValue().getFloat(), dstType->isDoubleTy());
 				}
 			}
 			else
@@ -541,8 +580,7 @@ DynamicValue Interpreter::evaluateConstantExpr(const llvm::ConstantExpr* cexpr)
 			{
 				auto& intVal0 = val0.getAsIntValue();
 				auto res = cmp(intVal0.getInt(), val1.getAsIntValue().getInt());
-				intVal0.setInt(res);
-				return std::move(val0);
+				return DynamicValue::getIntValue(res);
 			}
 			else if (val0.isPointerValue() && val1.isPointerValue())
 			{
@@ -666,8 +704,7 @@ DynamicValue Interpreter::evaluateConstantExpr(const llvm::ConstantExpr* cexpr)
 			cast<GEPOperator>(cexpr)->accumulateConstantOffset(dataLayout, offsetInt);
 
 			auto& basePtrVal = baseVal.getAsPointerValue();
-			basePtrVal.setAddress(basePtrVal.getAddress() + offsetInt.getZExtValue());
-			return std::move(baseVal);
+			return DynamicValue::getPointerValue(basePtrVal.getAddressSpace(), basePtrVal.getAddress() + offsetInt.getZExtValue());
 		}
 		case Instruction::ExtractValue:
 		{
@@ -689,7 +726,7 @@ DynamicValue Interpreter::evaluateConstantExpr(const llvm::ConstantExpr* cexpr)
 				else
 					llvm_unreachable("extractvalue into a non-aggregate value!");
 			}
-			return std::move(baseVal);
+			return baseVal;
 		}
 		case Instruction::InsertValue:
 		{
@@ -714,7 +751,7 @@ DynamicValue Interpreter::evaluateConstantExpr(const llvm::ConstantExpr* cexpr)
 			}
 			baseVal = evaluateConstant(cexpr->getOperand(1));
 
-			return std::move(tmpBaseVal);
+			return tmpBaseVal;
 		}
 
 		case Instruction::InsertElement:
@@ -744,8 +781,7 @@ void Interpreter::evaluateInstruction(StackFrame& frame, const llvm::Instruction
 		auto& intVal0 = val0.getAsIntValue();
 		auto& intVal1 = val1.getAsIntValue();
 
-		intVal0.setInt(binOp(intVal0.getInt(), intVal1.getInt()));
-		frame.insertBinding(inst, std::move(val0));
+		frame.insertBinding(inst, DynamicValue::getIntValue(binOp(intVal0.getInt(), intVal1.getInt())));
 	};
 
 	auto evaluateFloatBinOp = [this, &frame, inst] (auto binOp)
@@ -754,9 +790,9 @@ void Interpreter::evaluateInstruction(StackFrame& frame, const llvm::Instruction
 		auto val1 = evaluateOperand(frame, inst->getOperand(1));
 		auto& fpVal0 = val0.getAsFloatValue();
 		auto& fpVal1 = val1.getAsFloatValue();
+		assert(fpVal0.isDouble() == fpVal1.isDouble());
 
-		fpVal0.setFloat(binOp(fpVal0.getFloat(), fpVal1.getFloat()));
-		frame.insertBinding(inst, std::move(val0));
+		frame.insertBinding(inst, DynamicValue::getFloatValue(binOp(fpVal0.getFloat(), fpVal1.getFloat()), fpVal0.isDouble()));
 	};
 
 	auto evaluateIntUnOp = [this, &frame, inst] (auto unOp)
@@ -764,8 +800,7 @@ void Interpreter::evaluateInstruction(StackFrame& frame, const llvm::Instruction
 		auto srcVal = evaluateOperand(frame, inst->getOperand(0));
 		auto& srcIntVal = srcVal.getAsIntValue();
 
-		srcIntVal.setInt(unOp(srcIntVal.getInt()));
-		frame.insertBinding(inst, std::move(srcVal));
+		frame.insertBinding(inst, DynamicValue::getIntValue(unOp(srcIntVal.getInt())));
 	};
 
 	switch (inst->getOpcode())
@@ -1005,8 +1040,7 @@ void Interpreter::evaluateInstruction(StackFrame& frame, const llvm::Instruction
 			{
 				auto& intVal0 = val0.getAsIntValue();
 				auto res = cmp(intVal0.getInt(), val1.getAsIntValue().getInt());
-				intVal0.setInt(res);
-				frame.insertBinding(inst, std::move(val0));
+				frame.insertBinding(inst, DynamicValue::getIntValue(res));
 			}
 			else if (val0.isPointerValue() && val1.isPointerValue())
 			{
@@ -1117,8 +1151,8 @@ void Interpreter::evaluateInstruction(StackFrame& frame, const llvm::Instruction
 
 			auto srcVal = evaluateOperand(frame, inst->getOperand(0));
 			auto& srcFloatVal = srcVal.getAsFloatValue();
-			srcFloatVal.setFloat(static_cast<float>(srcFloatVal.getFloat()));
-			frame.insertBinding(inst, std::move(srcVal));
+			assert(srcFloatVal.isDouble());
+			frame.insertBinding(inst, DynamicValue::getFloatValue(static_cast<float>(srcFloatVal.getFloat()), false));
 			break;
 		}
 		case Instruction::FPExt:
@@ -1129,7 +1163,9 @@ void Interpreter::evaluateInstruction(StackFrame& frame, const llvm::Instruction
 				llvm_unreachable("Invalid FPExt instruction");
 			// Extention is a non-op for us
 			auto srcVal = evaluateOperand(frame, inst->getOperand(0));
-			frame.insertBinding(inst, std::move(srcVal));
+			auto& srcFloatVal = srcVal.getAsFloatValue();
+			assert(!srcFloatVal.isDouble());
+			frame.insertBinding(inst, DynamicValue::getFloatValue(srcFloatVal.getFloat(), true));
 			break;
 		}
 		// Since APInt can represent both UI and SI, we process them in the same way
@@ -1140,7 +1176,7 @@ void Interpreter::evaluateInstruction(StackFrame& frame, const llvm::Instruction
 
 			auto srcVal = evaluateOperand(frame, inst->getOperand(0));
 			auto resVal = DynamicValue::getIntValue(APIntOps::RoundDoubleToAPInt(srcVal.getAsFloatValue().getFloat(), intWidth));
-			frame.insertBinding(inst, std::move(resVal));
+			frame.insertBinding(inst, resVal);
 			break;
 		}
 		// Ditto
@@ -1148,8 +1184,8 @@ void Interpreter::evaluateInstruction(StackFrame& frame, const llvm::Instruction
 		case Instruction::SIToFP:
 		{
 			auto srcVal = evaluateOperand(frame, inst->getOperand(0));
-			auto resVal = DynamicValue::getFloatValue(APIntOps::RoundAPIntToDouble(srcVal.getAsIntValue().getInt()));
-			frame.insertBinding(inst, std::move(resVal));
+			auto resVal = DynamicValue::getFloatValue(APIntOps::RoundAPIntToDouble(srcVal.getAsIntValue().getInt()), inst->getType()->isDoubleTy());
+			frame.insertBinding(inst, resVal);
 			break;
 		}
 		case Instruction::IntToPtr:
@@ -1167,7 +1203,7 @@ void Interpreter::evaluateInstruction(StackFrame& frame, const llvm::Instruction
 			}
 
 			auto resVal = DynamicValue::getPointerValue(addrSpace, srcVal.getAsIntValue().getInt().zextOrTrunc(ptrSize).getZExtValue());
-			frame.insertBinding(inst, std::move(resVal));
+			frame.insertBinding(inst, resVal);
 			break;
 		}
 		case Instruction::PtrToInt:
@@ -1175,7 +1211,7 @@ void Interpreter::evaluateInstruction(StackFrame& frame, const llvm::Instruction
 			auto intWidth = cast<IntegerType>(inst->getType())->getBitWidth();
 			auto srcVal = evaluateOperand(frame, inst->getOperand(0));
 			auto resVal = DynamicValue::getIntValue(APInt(intWidth, srcVal.getAsPointerValue().getAddress()));
-			frame.insertBinding(inst, std::move(resVal));
+			frame.insertBinding(inst, resVal);
 			break;
 		}
 		case Instruction::BitCast:
@@ -1211,13 +1247,13 @@ void Interpreter::evaluateInstruction(StackFrame& frame, const llvm::Instruction
 				if (srcType->isIntegerTy())
 				{
 					auto srcVal = evaluateOperand(frame, inst->getOperand(0));
-					auto resVal = DynamicValue::getFloatValue(srcVal.getAsIntValue().getInt().bitsToDouble());
-					frame.insertBinding(inst, std::move(resVal));
+					auto resVal = DynamicValue::getFloatValue(srcVal.getAsIntValue().getInt().bitsToDouble(), dstType->isDoubleTy());
+					frame.insertBinding(inst, resVal);
 				}
 				else
 				{
 					auto resVal = evaluateOperand(frame, inst->getOperand(0));
-					frame.insertBinding(inst, std::move(resVal));
+					frame.insertBinding(inst, DynamicValue::getFloatValue(resVal.getAsFloatValue().getFloat(), dstType->isDoubleTy()));
 				}
 			}
 			else
@@ -1239,9 +1275,9 @@ void Interpreter::evaluateInstruction(StackFrame& frame, const llvm::Instruction
 			}
 
 			auto allocSize = dataLayout.getTypeAllocSize(allocInst->getType()->getElementType());
-			auto retAddr = allocateStackMem(frame, allocSize, allocInst->getType()->getElementType());
+			auto retAddr = allocateStackMem(frame, allocSize);
 			for (auto i = 1; i < allocElems; ++i)
-				allocateStackMem(frame, allocSize, allocInst->getType()->getElementType());
+				allocateStackMem(frame, allocSize);
 
 			frame.insertBinding(inst, DynamicValue::getPointerValue(PointerAddressSpace::STACK_SPACE, retAddr));
 
@@ -1250,13 +1286,14 @@ void Interpreter::evaluateInstruction(StackFrame& frame, const llvm::Instruction
 		case Instruction::Load:
 		{
 			auto loadInst = cast<LoadInst>(inst);
+			auto loadType = loadInst->getType();
 
 			auto loadSrc = evaluateOperand(frame, loadInst->getPointerOperand());
 			auto& loadPtr = loadSrc.getAsPointerValue();
 
-			auto resVal = readFromPointer(loadPtr);
+			auto resVal = readFromPointer(loadPtr, loadType);
 
-			frame.insertBinding(inst, std::move(resVal));
+			frame.insertBinding(inst, resVal);
 
 			break;
 		}
@@ -1268,14 +1305,7 @@ void Interpreter::evaluateInstruction(StackFrame& frame, const llvm::Instruction
 			auto storeVal = evaluateOperand(frame, storeInst->getValueOperand());
 			auto& storePtr = storeSrc.getAsPointerValue();
 
-			if (frame.getFunction()->getName() == "func_6")
-			{
-				errs() << "inst = " << *inst << '\n';
-				errs() << "storePtr = " << storeSrc.toString() << "\n";
-				errs() << "storeVal = " << storeVal.toString() << "\n";
-			}
-
-			writeToPointer(storePtr, std::move(storeVal));
+			writeToPointer(storePtr, storeVal);
 
 			break;
 		}
@@ -1303,8 +1333,7 @@ void Interpreter::evaluateInstruction(StackFrame& frame, const llvm::Instruction
 				}
 			}
 
-			basePtrVal.setAddress(baseAddr);
-			frame.insertBinding(inst, std::move(baseVal));
+			frame.insertBinding(inst, DynamicValue::getPointerValue(basePtrVal.getAddressSpace(), baseAddr));
 
 			break;
 		}
@@ -1333,7 +1362,7 @@ void Interpreter::evaluateInstruction(StackFrame& frame, const llvm::Instruction
 					llvm_unreachable("extractvalue into a non-aggregate type!");
 			}
 			
-			frame.insertBinding(inst, std::move(baseVal));
+			frame.insertBinding(inst, baseVal);
 			break;
 		}
 		case Instruction::InsertValue:
@@ -1360,7 +1389,7 @@ void Interpreter::evaluateInstruction(StackFrame& frame, const llvm::Instruction
 			}
 			baseVal = evaluateOperand(frame, ivInst->getInsertedValueOperand());
 			
-			frame.insertBinding(inst, std::move(tmpBaseVal));
+			frame.insertBinding(inst, tmpBaseVal);
 			break;
 		}
 		case Instruction::Select:

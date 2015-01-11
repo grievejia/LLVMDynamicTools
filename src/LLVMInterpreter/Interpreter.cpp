@@ -13,22 +13,10 @@ Interpreter::Interpreter(llvm::Module* m): module(m), dataLayout(m)
 
 Interpreter::~Interpreter() {}
 
-Address Interpreter::allocateStackMem(StackFrame& frame, unsigned size, Type* type)
+Address Interpreter::allocateStackMem(StackFrame& frame, unsigned size)
 {
 	frame.increaseAllocationSize(size);
-
-	if (type == nullptr)
-		return stackMem.allocate(size);
-	
-	if (auto arrayType = dyn_cast<ArrayType>(type))
-		return stackMem.allocateAndInitialize(size, evaluateConstant(UndefValue::get(arrayType)));
-	else if (auto structType = dyn_cast<StructType>(type))
-	{
-		// Construct the layout of the StructValue here
-		return stackMem.allocateAndInitialize(size, evaluateConstant(UndefValue::get(structType)));
-	}
-	else
-		return stackMem.allocate(size);
+	return stackMem.allocate(size);
 }
 
 Address Interpreter::allocateGlobalMem(Type* type)
@@ -42,7 +30,7 @@ Address Interpreter::allocateGlobalMem(Type* type)
 
 void Interpreter::evaluateGlobals()
 {
-	globalMem.clear();
+	PointerValue::setPointerSize(dataLayout.getPointerSize());
 
 	for (auto const& globalVal: module->globals())
 	{
@@ -230,15 +218,9 @@ std::vector<DynamicValue> Interpreter::createArgvArray(const std::vector<std::st
 	// Push argc first
 	retVec.push_back(DynamicValue::getIntValue(APInt(32, mainArgs.size())));
 
-	// Compute the overall arg size
-	auto totalArgSize = 0u;
-	for (auto const& argStr: mainArgs)
-		totalArgSize += (argStr.size() + 1);
-
 	// Allocate the argv array in the global memory section
-	auto charType = Type::getInt8Ty(module->getContext());
 	auto ptrSize = dataLayout.getPointerSize();
-	auto argvPtrAddr = globalMem.allocateAndInitialize(totalArgSize, evaluateConstant(UndefValue::get(ArrayType::get(PointerType::getUnqual(charType), mainArgs.size()))));
+	auto argvPtrAddr = globalMem.allocate(mainArgs.size() * ptrSize);
 
 	// Push the argv pointer
 	retVec.push_back(DynamicValue::getPointerValue(PointerAddressSpace::GLOBAL_SPACE, argvPtrAddr));
@@ -248,11 +230,7 @@ std::vector<DynamicValue> Interpreter::createArgvArray(const std::vector<std::st
 	{
 		// Allocate the corresponding argv[] array
 		auto argSize = argStr.size() + 1;
-		auto argvAddr = globalMem.allocateAndInitialize(argSize,
-			evaluateConstant(
-				UndefValue::get(ArrayType::get(charType, argSize))
-			)
-		);
+		auto argvAddr = globalMem.allocate(argSize);
 
 		// Update the argv pointer
 		globalMem.write(argvPtrAddr, DynamicValue::getPointerValue(PointerAddressSpace::GLOBAL_SPACE, argvAddr));

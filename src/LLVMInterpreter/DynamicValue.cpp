@@ -8,32 +8,9 @@
 using namespace llvm;
 using namespace llvm_interpreter;
 
-IntValue* IntValue::clone() const
-{
-	return new IntValue(intVal);
-}
+size_t PointerValue::PointerSize = 8u;
 
-FloatValue* FloatValue::clone() const
-{
-	return new FloatValue(fpVal);
-}
-
-PointerValue* PointerValue::clone() const
-{
-	return new PointerValue(addrSpace, ptr);
-}
-
-ArrayValue* ArrayValue::clone() const
-{
-	return new ArrayValue(array, elemSize);
-}
-
-StructValue* StructValue::clone() const
-{
-	return new StructValue(structMap, structSize);
-}
-
-ArrayValue::ArrayValue(unsigned eCount, unsigned eSize): DynamicValueConcept(DynamicValueType::ARRAY_VALUE), array(eCount, DynamicValue::getUndefValue()), elemSize(eSize) {}
+ArrayValue::ArrayValue(unsigned eCount, unsigned eSize): array(eCount, DynamicValue::getUndefValue()), elemSize(eSize) {}
 
 void ArrayValue::setElementAtIndex(unsigned idx, DynamicValue&& val)
 {
@@ -44,24 +21,6 @@ void ArrayValue::setElementAtIndex(unsigned idx, DynamicValue&& val)
 DynamicValue ArrayValue::getElementAtIndex(unsigned idx) const
 {
 	return array.at(idx);
-}
-
-DynamicValue& ArrayValue::getValueAtOffset(unsigned offset)
-{
-	if (offset >= elemSize * array.size())
-		llvm_unreachable("Out-of-bound array offset access");
-
-	auto divQuot = offset / elemSize;
-	auto divRem = offset % elemSize;
-	auto& elem = array.at(divQuot);
-	if (elem.isAggregateValue())
-		return elem.getValueAtOffset(divRem);
-	else
-	{
-		if (divRem != 0)
-			llvm_unreachable("Trying to offset-access into a scalar value!");
-		return elem;
-	}
 }
 
 void StructValue::addField(unsigned offset, DynamicValue&& val)
@@ -86,168 +45,195 @@ unsigned StructValue::getOffsetAtNum(unsigned num) const
 	return std::next(structMap.begin(), num)->first;
 }
 
-DynamicValue& StructValue::getValueAtOffset(unsigned offset)
+DynamicValue::DynamicValue(): type(DynamicValueType::UNDEF_VALUE) {}
+DynamicValue::DynamicValue(IntValue&& intVal): type(DynamicValueType::INT_VALUE)
 {
-	if (offset >= structSize)
-		llvm_unreachable("Out-of-bound struct offset access");
+	new (&data.intVal) IntValue(std::move(intVal));
+}
+DynamicValue::DynamicValue(FloatValue&& floatVal): type(DynamicValueType::FLOAT_VALUE)
+{
+	new (&data.floatVal) FloatValue(std::move(floatVal));
+}
+DynamicValue::DynamicValue(PointerValue&& ptrVal): type(DynamicValueType::POINTER_VALUE)
+{
+	new (&data.ptrVal) PointerValue(std::move(ptrVal));
+}
+DynamicValue::DynamicValue(ArrayValue&& arrayVal): type(DynamicValueType::ARRAY_VALUE)
+{
+	new (&data.arrayVal) ArrayValue(std::move(arrayVal));
+}
+DynamicValue::DynamicValue(StructValue&& structVal): type(DynamicValueType::STRUCT_VALUE)
+{
+	new (&data.structVal) StructValue(std::move(structVal));
+}
+DynamicValue::~DynamicValue() { clear(); }
 
-	auto itr = std::prev(structMap.upper_bound(offset));
-
-	auto& elem = itr->second;
-	if (elem.isAggregateValue())
-		return elem.getValueAtOffset(offset - itr->first);
-	else
+void DynamicValue::clear()
+{
+	switch (type)
 	{
-		if (itr->first != offset)
-			llvm_unreachable("Trying to offset-access into a scalar value!");
-		return elem;
+		case DynamicValueType::INT_VALUE:
+			data.intVal.~IntValue();
+			break;
+		case DynamicValueType::FLOAT_VALUE:
+			data.floatVal.~FloatValue();
+			break;
+		case DynamicValueType::POINTER_VALUE:
+			data.ptrVal.~PointerValue();
+			break;
+		case DynamicValueType::ARRAY_VALUE:
+			data.arrayVal.~ArrayValue();
+			break;
+		case DynamicValueType::STRUCT_VALUE:
+			data.structVal.~StructValue();
+			break;
+		case DynamicValueType::UNDEF_VALUE:
+			break;
 	}
 }
 
-DynamicValue::DynamicValue(DynamicValueConcept* c): impl(c) {}
-DynamicValue::~DynamicValue() {}
+void DynamicValue::copyFrom(const DynamicValue& other)
+{
+	type = other.type;
+	switch (type)
+	{
+		case DynamicValueType::INT_VALUE:
+			new (&data.intVal) IntValue(other.data.intVal);
+			break;
+		case DynamicValueType::FLOAT_VALUE:
+			new (&data.floatVal) FloatValue(other.data.floatVal);
+			break;
+		case DynamicValueType::POINTER_VALUE:
+			new (&data.ptrVal) PointerValue(other.data.ptrVal);
+			break;
+		case DynamicValueType::ARRAY_VALUE:
+			new (&data.arrayVal) ArrayValue(other.data.arrayVal);
+			break;
+		case DynamicValueType::STRUCT_VALUE:
+			new (&data.structVal) StructValue(other.data.structVal);
+			break;
+		case DynamicValueType::UNDEF_VALUE:
+			break;
+	}
+}
 
-DynamicValue::DynamicValue(DynamicValue&&) = default;
-DynamicValue& DynamicValue::operator=(DynamicValue&&) = default;
+void DynamicValue::moveFrom(DynamicValue&& other)
+{
+	type = other.type;
+	switch (type)
+	{
+		case DynamicValueType::INT_VALUE:
+			new (&data.intVal) IntValue(std::move(other.data.intVal));
+			break;
+		case DynamicValueType::FLOAT_VALUE:
+			new (&data.floatVal) FloatValue(std::move(other.data.floatVal));
+			break;
+		case DynamicValueType::POINTER_VALUE:
+			new (&data.ptrVal) PointerValue(std::move(other.data.ptrVal));
+			break;
+		case DynamicValueType::ARRAY_VALUE:
+			new (&data.arrayVal) ArrayValue(std::move(other.data.arrayVal));
+			break;
+		case DynamicValueType::STRUCT_VALUE:
+			new (&data.structVal) StructValue(std::move(other.data.structVal));
+			break;
+		case DynamicValueType::UNDEF_VALUE:
+			break;
+	}
+}
 
 DynamicValue::DynamicValue(const DynamicValue& other)
 {
-	if (other.impl)
-		impl = std::unique_ptr<DynamicValueConcept>(other.impl->clone());
-	else
-		impl = nullptr;
+	copyFrom(other);
 }
 DynamicValue& DynamicValue::operator=(const DynamicValue& other)
 {
-	if (other.impl)
-		impl = std::unique_ptr<DynamicValueConcept>(other.impl->clone());
-	else
-		impl = nullptr;
+	if (type != other.type)
+		clear();
+	copyFrom(other);
 	return *this;
 }
 
-IntValue& DynamicValue::getAsIntValue()
+DynamicValue::DynamicValue(DynamicValue&& other)
 {
-	assert(impl.get() != nullptr);
-	return cast<IntValue>(*impl);
+	moveFrom(std::move(other));
+}
+DynamicValue& DynamicValue::operator=(DynamicValue&& other)
+{
+	if (type != other.type)
+		clear();
+	moveFrom(std::move(other));
+	return *this;
 }
 
 const IntValue& DynamicValue::getAsIntValue() const
 {
-	assert(impl.get() != nullptr);
-	return cast<IntValue>(*impl);
+	assert(type == DynamicValueType::INT_VALUE);
+	return data.intVal;
 }
 
-FloatValue& DynamicValue::getAsFloatValue()
+const FloatValue& DynamicValue::getAsFloatValue() const
 {
-	assert(impl.get() != nullptr);
-	return cast<FloatValue>(*impl);
-}
-
-PointerValue& DynamicValue::getAsPointerValue()
-{
-	assert(impl.get() != nullptr);
-	return cast<PointerValue>(*impl);
+	assert(type == DynamicValueType::FLOAT_VALUE);
+	return data.floatVal;
 }
 
 const PointerValue& DynamicValue::getAsPointerValue() const
 {
-	assert(impl.get() != nullptr);
-	return cast<PointerValue>(*impl);
+	assert(type == DynamicValueType::POINTER_VALUE);
+	return data.ptrVal;
 }
 
 ArrayValue& DynamicValue::getAsArrayValue()
 {
-	assert(impl.get() != nullptr);
-	return cast<ArrayValue>(*impl);
+	assert(type == DynamicValueType::ARRAY_VALUE);
+	return data.arrayVal;
 }
 
 const ArrayValue& DynamicValue::getAsArrayValue() const
 {
-	assert(impl.get() != nullptr);
-	return cast<ArrayValue>(*impl);
+	assert(type == DynamicValueType::ARRAY_VALUE);
+	return data.arrayVal;
 }
 
 StructValue& DynamicValue::getAsStructValue()
 {
-	assert(impl.get() != nullptr);
-	return cast<StructValue>(*impl);
+	assert(type == DynamicValueType::STRUCT_VALUE);
+	return data.structVal;
 }
 
 const StructValue& DynamicValue::getAsStructValue() const
 {
-	assert(impl.get() != nullptr);
-	return cast<StructValue>(*impl);
-}
-
-bool DynamicValue::isIntValue() const
-{
-	return !isUndefValue() && isa<IntValue>(*impl);
-}
-
-bool DynamicValue::isFloatValue() const
-{
-	return !isUndefValue() && isa<FloatValue>(*impl);
-}
-
-bool DynamicValue::isPointerValue() const
-{
-	return !isUndefValue() && isa<PointerValue>(*impl);
-}
-
-bool DynamicValue::isArrayValue() const
-{
-	return !isUndefValue() && isa<ArrayValue>(*impl);
-}
-
-bool DynamicValue::isStructValue() const
-{
-	return !isUndefValue() && isa<StructValue>(*impl);
-}
-
-bool DynamicValue::isAggregateValue() const
-{
-	return !isUndefValue() && (isa<StructValue>(*impl) || isa<ArrayValue>(*impl));
+	assert(type == DynamicValueType::STRUCT_VALUE);
+	return data.structVal;
 }
 
 DynamicValue DynamicValue::getUndefValue()
 {
-	return DynamicValue(nullptr);
+	return DynamicValue();
 }
 
 DynamicValue DynamicValue::getIntValue(const llvm::APInt& i)
 {
-	return DynamicValue(new IntValue(i));
+	return DynamicValue(IntValue(i));
 }
 
-DynamicValue DynamicValue::getFloatValue(double f)
+DynamicValue DynamicValue::getFloatValue(double f, bool i)
 {
-	return DynamicValue(new FloatValue(f));
+	return DynamicValue(FloatValue(f, i));
 }
 
 DynamicValue DynamicValue::getPointerValue(PointerAddressSpace s, Address a)
 {
-	return DynamicValue(new PointerValue(s, a));
+	return DynamicValue(PointerValue(s, a));
 }
 
 DynamicValue DynamicValue::getArrayValue(unsigned elemCnt, unsigned elemSize)
 {
-	return DynamicValue(new ArrayValue(elemCnt, elemSize));
+	return DynamicValue(ArrayValue(elemCnt, elemSize));
 }
 
 DynamicValue DynamicValue::getStructValue(unsigned sz)
 {
-	return DynamicValue(new StructValue(sz));
-}
-
-DynamicValue& DynamicValue::getValueAtOffset(unsigned offset)
-{
-	if (isUndefValue())
-		llvm_unreachable("Trying to offset-access into an undef value!");
-	else if (auto arrayVal = dyn_cast<ArrayValue>(impl.get()))
-		return arrayVal->getValueAtOffset(offset);
-	else if (auto structVal = dyn_cast<StructValue>(impl.get()))
-		return structVal->getValueAtOffset(offset);
-	else
-		llvm_unreachable("Trying to offset-access into a scalar value!");
+	return DynamicValue(StructValue(sz));
 }

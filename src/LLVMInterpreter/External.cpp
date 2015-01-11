@@ -22,93 +22,6 @@ enum class ExternalCallType
 	FREE,
 };
 
-// getMallocType - Returns the PointerType resulting from the malloc call.
-// The PointerType depends on the number of bitcast uses of the malloc call:
-//   0: PointerType is the calls' return type.
-//   1: PointerType is the bitcast's result type.
-//  >1: Unique PointerType cannot be determined, return NULL.
-static PointerType* getMallocType(const Instruction* inst)
-{
-	assert(isa<CallInst>(inst) && "getMallocType and not a call");
-
-	PointerType* mallocType = nullptr;
-	unsigned numBitCastUses = 0;
-
-	// Determine if CallInst has a bitcast use.
-	for (auto itr = inst->user_begin(), ite = inst->user_end(); itr != ite; ++itr)
-	{
-		if (auto bitCastInst = dyn_cast<BitCastInst>(*itr))
-		{
-			mallocType = cast<PointerType>(bitCastInst->getDestTy());
-			++numBitCastUses;
-		}
-	}
-
-	if (numBitCastUses == 1)
-		return mallocType;
-	else if (numBitCastUses == 0)
-		return cast<PointerType>(inst->getType());
-	else
-		return nullptr;
-}
-
-static void fillMemoryImpl(MemorySection& mem, Address addr, unsigned fillInt, Type* type, DataLayout& dataLayout)
-{
-	if (auto arrayType = dyn_cast<ArrayType>(type))
-	{
-		auto elemType = arrayType->getElementType();
-		auto elemSize = dataLayout.getTypeAllocSize(elemType);
-		for (unsigned i = 0, e = arrayType->getNumElements(); i < e; ++i)
-			fillMemoryImpl(mem, addr + i * elemSize, fillInt, elemType, dataLayout);
-	}
-	else if (auto stType = dyn_cast<StructType>(type))
-	{
-		auto stLayout = dataLayout.getStructLayout(stType);
-
-		for (unsigned i = 0, e = stType->getNumElements(); i < e; ++i)
-		{
-			fillMemoryImpl(mem, addr + stLayout->getElementOffset(i), fillInt, stType->getElementType(i), dataLayout);
-		}
-	}
-	else if (auto intType = dyn_cast<IntegerType>(type))
-	{
-		mem.write(addr, DynamicValue::getIntValue(APInt(intType->getBitWidth(), fillInt)));
-	}
-	else if (type->isFloatTy() || type->isDoubleTy())
-	{
-		if (fillInt == 0)
-			mem.write(addr, DynamicValue::getFloatValue(0));
-		else
-			llvm_unreachable("memset() floats to an int value?");
-	}
-	else if (type->isPointerTy())
-	{
-		if (fillInt == 0)
-			mem.write(addr, DynamicValue::getPointerValue(PointerAddressSpace::GLOBAL_SPACE, 0));
-		else
-			llvm_unreachable("memset() fabricates pointers from int");
-	}
-	else
-		llvm_unreachable("Unhandled type in fillMemoryImpl()");
-};
-
-std::string Interpreter::ptrToString(DynamicValue& v)
-{
-	auto retStr = std::string();
-	auto& ptrVal = v.getAsPointerValue();
-
-	while (true)
-	{
-		auto readInt = readFromPointer(ptrVal).getAsIntValue().getInt().getZExtValue();
-		if (readInt == 0)
-			break;
-		retStr.push_back(static_cast<char>(readInt));
-		ptrVal.setAddress(ptrVal.getAddress() + 1);
-	}
-
-	return retStr;
-}
-
 DynamicValue Interpreter::callExternalFunction(ImmutableCallSite cs, const llvm::Function* f, std::vector<DynamicValue>&& argValues)
 {
 	static std::unordered_map<std::string, ExternalCallType> externalFuncMap =
@@ -125,45 +38,16 @@ DynamicValue Interpreter::callExternalFunction(ImmutableCallSite cs, const llvm:
 		{ "free", ExternalCallType::FREE },
 	};
 
-	auto readMemoryRegion = [this] (const PointerValue& ptr, unsigned size)
+	auto getRawPointer = [this] (const PointerValue& ptr)
 	{
 		switch (ptr.getAddressSpace())
 		{
 			case PointerAddressSpace::GLOBAL_SPACE:
-				return globalMem.readMemoryRegion(ptr.getAddress(), size);
+				return globalMem.getRawPointerAtAddress(ptr.getAddress());
 			case PointerAddressSpace::STACK_SPACE:
-				return stackMem.readMemoryRegion(ptr.getAddress(), size);
+				return stackMem.getRawPointerAtAddress(ptr.getAddress());
 			case PointerAddressSpace::HEAP_SPACE:
-				return heapMem.readMemoryRegion(ptr.getAddress(), size);
-		}
-	};
-
-	auto writeMemoryRegion = [this] (const PointerValue& ptr, MemoryRegion&& reg)
-	{
-		switch (ptr.getAddressSpace())
-		{
-			case PointerAddressSpace::GLOBAL_SPACE:
-				return globalMem.writeMemoryRegion(ptr.getAddress(), std::move(reg));
-			case PointerAddressSpace::STACK_SPACE:
-				return stackMem.writeMemoryRegion(ptr.getAddress(), std::move(reg));
-			case PointerAddressSpace::HEAP_SPACE:
-				return heapMem.writeMemoryRegion(ptr.getAddress(), std::move(reg));
-		}
-	};
-
-	auto fillMemory = [this] (const PointerValue& ptr, unsigned fillInt, Type* fillType)
-	{
-		switch (ptr.getAddressSpace())
-		{
-			case PointerAddressSpace::GLOBAL_SPACE:
-				fillMemoryImpl(globalMem, ptr.getAddress(), fillInt, fillType, dataLayout);
-				break;
-			case PointerAddressSpace::STACK_SPACE:
-				fillMemoryImpl(stackMem, ptr.getAddress(), fillInt, fillType, dataLayout);
-				break;
-			case PointerAddressSpace::HEAP_SPACE:
-				fillMemoryImpl(heapMem, ptr.getAddress(), fillInt, fillType, dataLayout);
-				break;
+				return heapMem.getRawPointerAtAddress(ptr.getAddress());
 		}
 	};
 
@@ -183,7 +67,8 @@ DynamicValue Interpreter::callExternalFunction(ImmutableCallSite cs, const llvm:
 			assert(argValues.size() >= 1);
 
 			// Use boost::format to output the format string
-			auto fmt = boost::format(ptrToString(argValues.at(0)));
+			auto fmtStrPtr = argValues.at(0).getAsPointerValue();
+			auto fmt = boost::format(static_cast<const char*>(getRawPointer(fmtStrPtr)));
 			for (auto i = std::size_t(1), e = argValues.size(); i < e; ++i)
 			{
 				auto& argVal = argValues[i];
@@ -194,7 +79,7 @@ DynamicValue Interpreter::callExternalFunction(ImmutableCallSite cs, const llvm:
 				else if (argVal.isFloatValue())
 					fmt % argVal.getAsFloatValue().getFloat();
 				else if (argVal.isPointerValue())
-					fmt % ptrToString(argVal);
+					fmt % static_cast<const char*>(getRawPointer(argVal.getAsPointerValue()));
 				else
 					llvm_unreachable("Passing an array or struct to printf?");
 			}
@@ -211,15 +96,7 @@ DynamicValue Interpreter::callExternalFunction(ImmutableCallSite cs, const llvm:
 			auto& srcPtr = argValues.at(1).getAsPointerValue();
 			auto size = argValues.at(2).getAsIntValue().getInt().getZExtValue();
 
-			errs() << "inst = " << *cs.getInstruction() << "\n";
-			/*errs() << "destPtr = " << destPtr.getAddress();
-			errs() << "srcPtr = " << srcPtr.getAddress();
-			stackMem.dumpMemory();*/
-
-			auto region = readMemoryRegion(srcPtr, size);
-			for (auto const& mapping: region)
-				errs() << mapping.first << ", " << mapping.second.toString() << "\n";
-			writeMemoryRegion(destPtr, std::move(region));
+			std::memcpy(getRawPointer(destPtr), getRawPointer(srcPtr), size);
 			
 			return DynamicValue::getUndefValue();
 		}
@@ -231,12 +108,7 @@ DynamicValue Interpreter::callExternalFunction(ImmutableCallSite cs, const llvm:
 			auto fillInt = argValues.at(1).getAsIntValue().getInt().getZExtValue();
 			auto size = argValues.at(2).getAsIntValue().getInt().getZExtValue();
 			
-			auto memRegion = readMemoryRegion(destPtr, size);
-			if (memRegion.getNumEntry() > 1)
-				llvm_unreachable("Memset() gets an awesome memory region");
-
-			auto fillType = cast<PointerType>(cs.getArgument(0)->stripPointerCasts()->getType())->getElementType();
-			fillMemory(destPtr, fillInt, fillType);
+			std::memset(getRawPointer(destPtr), fillInt, size);
 
 			return DynamicValue::getUndefValue();
 		}
@@ -244,24 +116,9 @@ DynamicValue Interpreter::callExternalFunction(ImmutableCallSite cs, const llvm:
 		{
 			assert(argValues.size() >= 1);
 
-			auto mallocType = getMallocType(cs.getInstruction());
-			if (mallocType == nullptr)
-				llvm_unreachable("Untyped malloc() not supported");
-
 			auto mallocSize = argValues.at(0).getAsIntValue().getInt().getZExtValue();
-			auto mallocTypeSize = dataLayout.getTypeAllocSize(mallocType);
-			if (mallocSize != mallocTypeSize)
-				llvm_unreachable("malloc size != malloc type size?");
 
-			auto retAddr = 0;
-			if (auto arrayType = dyn_cast<ArrayType>(mallocType))
-				retAddr = heapMem.allocateAndInitialize(mallocSize, evaluateConstant(UndefValue::get(arrayType)));
-			else if (auto structType = dyn_cast<StructType>(mallocType))
-			{
-				retAddr = heapMem.allocateAndInitialize(mallocSize, evaluateConstant(UndefValue::get(structType)));
-			}
-			else
-				retAddr = heapMem.allocate(mallocSize);
+			auto retAddr = heapMem.allocate(mallocSize);
 
 			return DynamicValue::getPointerValue(PointerAddressSpace::HEAP_SPACE, retAddr);
 		}

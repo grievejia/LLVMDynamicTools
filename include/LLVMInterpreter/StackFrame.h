@@ -33,12 +33,12 @@ public:
 	unsigned getAllocationSize() const { return allocSize; }
 	void increaseAllocationSize(unsigned sz) { allocSize += sz; }
 
-	void insertBinding(const llvm::Value* v, DynamicValue&& val)
+	void insertBinding(const llvm::Value* v, const DynamicValue& val)
 	{
 		//assert(!vRegs.count(v) && "Duplicate entries in env!");
 		auto itr = vRegs.find(v);
 		if (itr == vRegs.end())
-			vRegs.insert(std::make_pair(v, std::move(val)));
+			vRegs.insert(std::make_pair(v, val));
 		else
 			itr->second = std::move(val);
 	}
